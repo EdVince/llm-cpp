@@ -11,7 +11,7 @@
     - 直接加载safetensor权重且不进行额外存储
  - 支持GPTQ量化，fp16激活
  - 支持kv cache，使用fp16存储
- - 支持Qwen1.5-xxB-Chat-GPTQ-Int4/Int8模型
+ - 支持Qwen1.5-xxB-Chat-GPTQ-Int4模型
  - 两种输出模式
     - 使用argmax的确定性输出
     - 使用概率采样的不确定性输出
