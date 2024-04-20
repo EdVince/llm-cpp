@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.5)
 project(chat)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-register")
 
 find_package(OpenMP REQUIRED)
 if(OPENMP_FOUND)
