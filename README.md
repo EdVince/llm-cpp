@@ -30,3 +30,4 @@ bash run.sh
  - load safetensors file from: https://github.com/syoyo/safetensors-cpp
  - tokenizer implement from: https://github.com/harrisonvanderbyl/rwkv-cpp-accelerated
  - ProgressBar from: https://github.com/gipert/progressbar/tree/master
+ - armpl from: https://developer.arm.com/documentation/101004/2404?lang=en

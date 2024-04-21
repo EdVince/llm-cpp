@@ -31,6 +31,9 @@
 
 #include <arm_neon.h>
 
+// #include "armpl.h"
+#include <stdio.h>
+
 using namespace std;
 using namespace ncnn;
 
@@ -848,10 +851,10 @@ public:
 };
 DEFINE_LAYER_CREATOR(EmbeddingLayer)
 
-class LNHeadLayer : public ncnn::Layer
+class LMHeadLayer : public ncnn::Layer
 {
 public:
-    LNHeadLayer() {
+    LMHeadLayer() {
         one_blob_only = true;
         support_inplace = false;
         support_packing = false;
@@ -889,7 +892,7 @@ public:
             }
             *p_top_blob = vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(tmp)), vcvt_f32_f16(vget_high_f16(tmp))));
         }
-        
+
         return 0;
     }
 
@@ -899,7 +902,7 @@ public:
     // model
     Mat weight_data;
 };
-DEFINE_LAYER_CREATOR(LNHeadLayer)
+DEFINE_LAYER_CREATOR(LMHeadLayer)
 
 class AddLayer : public ncnn::Layer {
 public:
@@ -1215,9 +1218,9 @@ public:
 class Linear : public Basic1T1 {
 public:
     Linear(string name, nlohmann::json& config) {
-        cur_layer = new LNHeadLayer();
+        cur_layer = new LMHeadLayer();
         cur_layer->name = name;
-        cur_layer->type = "LNHead";
+        cur_layer->type = "LMHead";
         // set param
         ncnn::ParamDict pd;
         pd.set(0, int(config["vocab_size"]));// num_output
@@ -1406,7 +1409,7 @@ public:
                         layer->weight_data = data;
                     }
                     {
-                        LNHeadLayer* layer = (LNHeadLayer*)get_layer("lm_head",layers);
+                        LMHeadLayer* layer = (LMHeadLayer*)get_layer("lm_head",layers);
                         if (layer->weight_data.empty()) {
                             layer->weight_data = std::move(data);
                         }
@@ -1414,7 +1417,7 @@ public:
                 }
                 else if (key.find("lm_head") != std::string::npos) {
                     ncnn::Mat data = load_weight(tensor,databuffer,false);
-                    LNHeadLayer* layer = (LNHeadLayer*)get_layer("lm_head",layers);
+                    LMHeadLayer* layer = (LMHeadLayer*)get_layer("lm_head",layers);
                     layer->weight_data = data;
                 }
                 else if ((key.find("layernorm.weight") != std::string::npos) || (key.find("model.norm") != std::string::npos)) {
@@ -1649,7 +1652,7 @@ public:
 };
 
 int main(int argc, char **argv) {
-    std::string modelpath = "Qwen1.5-4B-Chat-GPTQ-Int4";
+    std::string modelpath = "Qwen1.5-0.5B-Chat-GPTQ-Int4";
     string user_prompt = "Hello! How are you?";
 
     if (argc > 1) {
