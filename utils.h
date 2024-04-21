@@ -13,6 +13,39 @@
 #include <net.h>
 #include <layer.h>
 
+std::tuple<ncnn::Mat,ncnn::Mat> quant_embed(ncnn::Mat& weight_data, ncnn::Option& opt) {
+    int hidden_size = weight_data.w;
+    int vocab_size = weight_data.h;
+
+    ncnn::Mat quant_weight(hidden_size, vocab_size, 1u, 1, opt.workspace_allocator);
+    int8_t* p_quant_weight = (int8_t*)quant_weight;
+    ncnn::Mat weight_scale(vocab_size, 4u, 1, opt.workspace_allocator);
+    {
+        const float16* p_in = (const float16*)weight_data;
+        float* p_scale = (float*)weight_scale;
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int n = 0; n < vocab_size; n++) {
+            float _min = float16_to_float32(p_in[n*hidden_size]);
+            float _max = float16_to_float32(p_in[n*hidden_size]);
+            for (int k = 0; k < hidden_size; k++) {
+                _min = std::min(_min,float16_to_float32(p_in[n*hidden_size+k]));
+                _max = std::max(_max,float16_to_float32(p_in[n*hidden_size+k]));
+            }
+            p_scale[n] = std::max(abs(_min),abs(_max)) / 127.f;
+        }
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int n = 0; n < vocab_size; n++) {
+            for (int k = 0; k < hidden_size; k++) {
+                p_quant_weight[n*hidden_size+k] = int8_t(float16_to_float32(p_in[n*hidden_size+k]) / p_scale[n]);
+            }
+        }
+    }
+
+    weight_data.release();
+
+    return {quant_weight,weight_scale};
+}
+
 void logits_processor_RepetitionPenaltyLogitsProcessor(std::vector<int>& input_ids, ncnn::Mat& scores, float penalty) {
     // 去重，避免重复处理
     std::unordered_set<int> unique_set(input_ids.begin(), input_ids.end());

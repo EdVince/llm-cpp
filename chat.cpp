@@ -820,23 +820,21 @@ public:
         top_blob.create(num_output, words, 2u, opt.blob_allocator);
         if (top_blob.empty())
             return -100;
-
-        // num_output
+        
+        const float* p_weight_scale = (const float*)weight_scale;
         #pragma omp parallel for num_threads(opt.num_threads)
         for (int q = 0; q < words; q++)
         {
-            float16* outptr = (float16*)top_blob + q * num_output;
+            __fp16* outptr = (__fp16*)top_blob + q * num_output;
 
             int word_index = ((const int*)bottom_blob)[q];
+            if (word_index < 0) word_index = 0;
+            if (word_index >= input_dim) word_index = input_dim - 1;
 
-            if (word_index < 0)
-                word_index = 0;
-            if (word_index >= input_dim)
-                word_index = input_dim - 1;
-
-            const float16* em = (const float16*)weight_data + num_output * word_index;
-
-            memcpy(outptr, em, num_output*2u);
+            const int8_t* em = (const int8_t*)quant_weight + num_output * word_index;
+            for (int i = 0; i < num_output; i++) {
+                outptr[i] = __fp16(em[i] * p_weight_scale[q]);
+            }
         }
 
         return 0;
@@ -847,7 +845,7 @@ public:
     int num_output;
     int input_dim;
     // model
-    Mat weight_data;
+    Mat quant_weight, weight_scale;
 };
 DEFINE_LAYER_CREATOR(EmbeddingLayer)
 
@@ -875,22 +873,41 @@ public:
         if (top_blob.empty())
             return -100;
 
+        // quan input
+        ncnn::Mat quant_bottom_blob(hidden_size, 1u, 1, opt.workspace_allocator);
+        float bottom_blob_scale;
+        {
+            const __fp16* p_in = (const __fp16*)bottom_blob + (seq_len-1)*hidden_size;
+            float16x8_t _bottom_blob_scale = vabsq_f16(vld1q_f16(p_in)); p_in+=8;
+            for (int i = 8; i+7 < hidden_size; i+=8) {
+                _bottom_blob_scale = vmaxq_f16(_bottom_blob_scale,vabsq_f16(vld1q_f16(p_in)));
+                p_in+=8;
+            }
+            bottom_blob_scale = 127.f / float(vmaxvq_f16(_bottom_blob_scale));
+
+            p_in = (const __fp16*)bottom_blob + (seq_len-1)*hidden_size;
+            int8_t* p_quant_bottom_blob = (int8_t*)quant_bottom_blob;
+            for (int i = 0; i < hidden_size; i++) {
+                p_quant_bottom_blob[i] = int8_t(float(p_in[i]) * bottom_blob_scale);
+            }
+
+            bottom_blob_scale /= 127.f;
+        }
+
         int M = seq_len, K = hidden_size, N = num_output;
+        const float* p_weight_scale = (const float*)weight_scale;
+        float* p_top_blob = (float*)top_blob;
         #pragma omp parallel for num_threads(opt.num_threads)
         for (int n = 0; n < N; n++) {
-            const __fp16* p_bottom_blob = (const __fp16*)bottom_blob + (M-1)*K;
-            const __fp16* p_weight = (const __fp16*)weight_data + n*K;
-            float* p_top_blob = (float*)top_blob + n;
-            float16x8_t tmp = vdupq_n_f16((__fp16)0.f);
-            for (int k = 0; k+7 < K; k+=8) {
-                float16x8_t a = vld1q_f16(p_bottom_blob);
-                float16x8_t b = vld1q_f16(p_weight);
-                float16x8_t c = vmulq_f16(a,b);
-                tmp = vaddq_f16(tmp,c);
-                p_bottom_blob+=8;
-                p_weight+=8;
+            const int8_t* p_a = (int8_t*)quant_bottom_blob;
+            const int8_t* p_b = (const int8_t*)quant_weight+n*hidden_size;
+            int32x4_t _tmp = vdupq_n_s32(0);
+            for (int k = 0; k+15 < K; k+=16) {
+                _tmp = vdotq_s32(_tmp,vld1q_s8(p_a),vld1q_s8(p_b));
+                p_a+=16;
+                p_b+=16;
             }
-            *p_top_blob = vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(tmp)), vcvt_f32_f16(vget_high_f16(tmp))));
+            p_top_blob[n] = vaddvq_s32(_tmp) * bottom_blob_scale * p_weight_scale[n];
         }
 
         return 0;
@@ -900,7 +917,7 @@ public:
     // param
     int num_output;
     // model
-    Mat weight_data;
+    Mat quant_weight, weight_scale;
 };
 DEFINE_LAYER_CREATOR(LMHeadLayer)
 
@@ -1316,8 +1333,6 @@ tuple<vector<ncnn::Blob>,vector<ncnn::Layer*>> get_model(nlohmann::json& config,
     return {blobs,layers};
 }
 
-
-
 class Model {
 public:
     Model(string modelpath) {
@@ -1404,21 +1419,26 @@ public:
                 if (key.find("model.embed_tokens") != std::string::npos) {
                     // share weight
                     ncnn::Mat data = load_weight(tensor,databuffer,false);
+                    auto [quant_weight,weight_scale] = quant_embed(data,opt);
                     {
                         EmbeddingLayer* layer = (EmbeddingLayer*)get_layer("model.embed_tokens",layers);
-                        layer->weight_data = data;
+                        layer->quant_weight = quant_weight;
+                        layer->weight_scale = weight_scale;
                     }
                     {
                         LMHeadLayer* layer = (LMHeadLayer*)get_layer("lm_head",layers);
-                        if (layer->weight_data.empty()) {
-                            layer->weight_data = std::move(data);
+                        if (layer->quant_weight.empty()) {
+                            layer->quant_weight = quant_weight;
+                            layer->weight_scale = weight_scale;
                         }
                     }
                 }
                 else if (key.find("lm_head") != std::string::npos) {
                     ncnn::Mat data = load_weight(tensor,databuffer,false);
+                    auto [quant_weight,weight_scale] = quant_embed(data,opt);
                     LMHeadLayer* layer = (LMHeadLayer*)get_layer("lm_head",layers);
-                    layer->weight_data = data;
+                    layer->quant_weight = quant_weight;
+                    layer->weight_scale = weight_scale;
                 }
                 else if ((key.find("layernorm.weight") != std::string::npos) || (key.find("model.norm") != std::string::npos)) {
                     vector<string> token = split(key,'.');
