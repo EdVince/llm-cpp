@@ -37,9 +37,6 @@
 using namespace std;
 using namespace ncnn;
 
-typedef unsigned short float16;
-#define FLOAT_INF std::numeric_limits<float>::infinity()
-
 class Qwen2RotaryEmbedding {
 public:
     Qwen2RotaryEmbedding(int dim, int max_position_embeddings, double base, const Option& opt) : dim(dim) {
@@ -578,10 +575,8 @@ public:
                     p_top_blob[m*N+n] = float32_to_float16(vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(_tmp)), vcvt_f32_f16(vget_high_f16(_tmp)))));
                 }
             }
-
             return 0;
         }
-
         return 0;
     }
 
@@ -634,6 +629,8 @@ public:
     virtual int forward_inplace(Mat& bottom_top_blob, const Option& opt) const {
         int seq_len = bottom_top_blob.h;
 
+        auto start = std::chrono::high_resolution_clock::now();
+
         ncnn::Mat middle(intermediate_size, 2u, 1, opt.workspace_allocator);
         float16* p_middle = middle;
 
@@ -641,13 +638,10 @@ public:
         const float16* p_gate_proj_scales = (const float16*)gate_proj_scales;
         const uint32_t* p_up_proj_qweight = (const uint32_t*)up_proj_qweight;
         const float16* p_up_proj_scales = (const float16*)up_proj_scales;
-        const uint32_t* p_down_proj_qweight = (const uint32_t*)down_proj_qweight;
-        const float16* p_down_proj_scales = (const float16*)down_proj_scales;
 
         int M = seq_len;
         int K0 = hidden_size, N0 = intermediate_size;
         int K1 = intermediate_size, N1 = hidden_size;
-        
         for (int m = 0; m < M; m++) {
 
             #pragma omp parallel for num_threads(opt.num_threads)
@@ -691,33 +685,74 @@ public:
                 p_middle[n] = float32_to_float16(silu(gate_proj) * up_proj);
             }
 
-            float16* p_bottom_top_blob = (float16*)bottom_top_blob + m*N1;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int n = 0; n < N1; n++) {
-                float16x8_t _tmp = vdupq_n_f16((__fp16)0.f);
-                __fp16* p_middle = middle;
-                for (int k = 0; k+7 < K1; k+=8) {
-                    register int w;
-                    register __fp16 ww[8];
 
-                    float16x8_t _d = vld1q_f16((__fp16*)p_middle);
+            {
+                int group = K1/group_size;
 
-                    w = p_down_proj_qweight[k/part * N1 + n];
-                    ww[0] = (__fp16)(((w >> 0) & mask) - zeros);
-                    ww[1] = (__fp16)(((w >> 4) & mask) - zeros);
-                    ww[2] = (__fp16)(((w >> 8) & mask) - zeros);
-                    ww[3] = (__fp16)(((w >> 12) & mask) - zeros);
-                    ww[4] = (__fp16)(((w >> 16) & mask) - zeros);
-                    ww[5] = (__fp16)(((w >> 20) & mask) - zeros);
-                    ww[6] = (__fp16)(((w >> 24) & mask) - zeros);
-                    ww[7] = (__fp16)(((w >> 28) & mask) - zeros);
-                    _tmp = vfmaq_f16(_tmp,vmulq_f16(_d,vdupq_n_f16(((__fp16*)p_down_proj_scales)[k/group_size * N1 + n])),vld1q_f16(ww));
-
-                    p_middle+=8;
+                Mat quant_middle(intermediate_size,2u,1,opt.workspace_allocator);
+                Mat quant_middle_scale(group,4u,1,opt.workspace_allocator);
+                __fp16* p_middle = (__fp16*)middle;
+                int8_t* p_quant_middle = (int8_t*)quant_middle;
+                float* p_quant_middle_scale = (float*)quant_middle_scale;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int i = 0; i < group; i++) {
+                    float max = float(p_middle[i*group_size]);
+                    for (int j = 0; j < group_size; j++) {
+                        max = std::max(max,abs(float(p_middle[i*group_size+j])));
+                    }
+                    for (int j = 0; j < group_size; j++) {
+                        p_quant_middle[i*group_size+j] = int8_t(127.f * float(p_middle[i*group_size+j]) / max);
+                    }
+                    p_quant_middle_scale[i] = max / 127.f;
                 }
-                p_bottom_top_blob[n] = float32_to_float16(vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(_tmp)), vcvt_f32_f16(vget_high_f16(_tmp)))));
+
+                float16* p_bottom_top_blob = (float16*)bottom_top_blob + m*N1;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int n = 0; n < N1; n++) {
+                    int8_t* p_quant_middle = (int8_t*)quant_middle;
+                    float* p_quant_middle_scale = (float*)quant_middle_scale;
+                    const __fp16* p_down_proj_scales_T = (const __fp16*)down_proj_scales_T + n * group;
+                    const uint32_t* p_down_proj_qweight_T = (const uint32_t*)down_proj_qweight_T + n * (K1/8);
+                    float _tmp = 0.f;
+                    for (int g = 0; g < group; g++) {
+                        int32x4_t _qtmp = vdupq_n_s32(0);
+                        for (int k = 0; k+15 < group_size; k+=16) {
+                            register int w0, w1;
+                            register int8_t ww[16];
+                            w0 = *p_down_proj_qweight_T++;
+                            w1 = *p_down_proj_qweight_T++;
+                            ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
+                            ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
+                            ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
+                            ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
+                            ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
+                            ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
+                            ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
+                            ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
+                            ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
+                            ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
+                            ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
+                            ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
+                            ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
+                            ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
+                            ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
+                            ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
+                            int8x16_t _w = vld1q_s8(ww);
+                            int8x16_t _d = vld1q_s8(p_quant_middle);
+                            _qtmp = vdotq_s32(_qtmp,_w,_d);
+                            p_quant_middle+=16;
+                        }
+                        _tmp += vaddvq_s32(_qtmp) * float(*p_down_proj_scales_T++) * *p_quant_middle_scale++;
+                    }
+                    p_bottom_top_blob[n] = float32_to_float16(_tmp);
+                }
             }
         }
+
+        // auto end = std::chrono::high_resolution_clock::now();
+        // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        // if (name == "model.layers.10.mlp" && seq_len == 1)
+        //     std::cout << duration.count() << std::endl;
 
         return 0;
     }
@@ -737,7 +772,8 @@ public:
     // model
     Mat gate_proj_qweight, gate_proj_scales;
     Mat   up_proj_qweight,   up_proj_scales;
-    Mat down_proj_qweight, down_proj_scales;
+
+    Mat down_proj_qweight_T, down_proj_scales_T;
 };
 DEFINE_LAYER_CREATOR(Qwen2MLPLayer)
 
@@ -899,7 +935,7 @@ public:
         float* p_top_blob = (float*)top_blob;
         #pragma omp parallel for num_threads(opt.num_threads)
         for (int n = 0; n < N; n++) {
-            const int8_t* p_a = (int8_t*)quant_bottom_blob;
+            const int8_t* p_a = (const int8_t*)quant_bottom_blob;
             const int8_t* p_b = (const int8_t*)quant_weight+n*hidden_size;
             int32x4_t _tmp = vdupq_n_s32(0);
             for (int k = 0; k+15 < K; k+=16) {
@@ -1495,8 +1531,8 @@ public:
                     else if (weight_name == "up_proj.bias")         {}
                     else if (weight_name == "up_proj.g_idx")        {}
                     else if (weight_name == "up_proj.qzeros")       {}
-                    else if (weight_name == "down_proj.qweight")    layer->down_proj_qweight   = data;
-                    else if (weight_name == "down_proj.scales")     layer->down_proj_scales    = data;
+                    else if (weight_name == "down_proj.qweight")    layer->down_proj_qweight_T  = transpose(data,opt);
+                    else if (weight_name == "down_proj.scales")     layer->down_proj_scales_T   = transpose(data,opt);
                     else if (weight_name == "down_proj.bias")       {}
                     else if (weight_name == "down_proj.g_idx")      {}
                     else if (weight_name == "down_proj.qzeros")     {}
@@ -1672,7 +1708,7 @@ public:
 };
 
 int main(int argc, char **argv) {
-    std::string modelpath = "Qwen1.5-0.5B-Chat-GPTQ-Int4";
+    std::string modelpath = "Qwen1.5-4B-Chat-GPTQ-Int4";
     string user_prompt = "Hello! How are you?";
 
     if (argc > 1) {

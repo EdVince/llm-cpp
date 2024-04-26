@@ -13,7 +13,36 @@
 #include <net.h>
 #include <layer.h>
 
-std::tuple<ncnn::Mat,ncnn::Mat> quant_embed(ncnn::Mat& weight_data, ncnn::Option& opt) {
+typedef unsigned short float16;
+#define FLOAT_INF std::numeric_limits<float>::infinity()
+
+ncnn::Mat transpose(const ncnn::Mat& in, const ncnn::Option& opt) {
+    const int H = in.h, W = in.w;
+    ncnn::Mat inT(H,W,in.elemsize,1,opt.workspace_allocator);
+    if (in.elemsize == 2u) {
+        const float16* p_in = (const float16*)in;
+        float16* p_inT = (float16*)inT;
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int h = 0; h < H; h++) {
+            for (int w = 0; w < W; w++) {
+                p_inT[w*H+h] = p_in[h*W+w];
+            }
+        }
+    }
+    else {
+        const float* p_in = (const float*)in;
+        float* p_inT = (float*)inT;
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int h = 0; h < H; h++) {
+            for (int w = 0; w < W; w++) {
+                p_inT[w*H+h] = p_in[h*W+w];
+            }
+        }
+    }
+    return inT;
+}
+
+std::tuple<ncnn::Mat,ncnn::Mat> quant_embed(const ncnn::Mat& weight_data, const ncnn::Option& opt) {
     int hidden_size = weight_data.w;
     int vocab_size = weight_data.h;
 
@@ -25,23 +54,23 @@ std::tuple<ncnn::Mat,ncnn::Mat> quant_embed(ncnn::Mat& weight_data, ncnn::Option
         float* p_scale = (float*)weight_scale;
         #pragma omp parallel for num_threads(opt.num_threads)
         for (int n = 0; n < vocab_size; n++) {
-            float _min = float16_to_float32(p_in[n*hidden_size]);
-            float _max = float16_to_float32(p_in[n*hidden_size]);
+            float _min = ncnn::float16_to_float32(p_in[n*hidden_size]);
+            float _max = ncnn::float16_to_float32(p_in[n*hidden_size]);
             for (int k = 0; k < hidden_size; k++) {
-                _min = std::min(_min,float16_to_float32(p_in[n*hidden_size+k]));
-                _max = std::max(_max,float16_to_float32(p_in[n*hidden_size+k]));
+                _min = std::min(_min,ncnn::float16_to_float32(p_in[n*hidden_size+k]));
+                _max = std::max(_max,ncnn::float16_to_float32(p_in[n*hidden_size+k]));
             }
             p_scale[n] = std::max(abs(_min),abs(_max)) / 127.f;
         }
         #pragma omp parallel for num_threads(opt.num_threads)
         for (int n = 0; n < vocab_size; n++) {
             for (int k = 0; k < hidden_size; k++) {
-                p_quant_weight[n*hidden_size+k] = int8_t(float16_to_float32(p_in[n*hidden_size+k]) / p_scale[n]);
+                p_quant_weight[n*hidden_size+k] = int8_t(ncnn::float16_to_float32(p_in[n*hidden_size+k]) / p_scale[n]);
             }
         }
     }
 
-    weight_data.release();
+    // weight_data.release();
 
     return {quant_weight,weight_scale};
 }
