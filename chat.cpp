@@ -108,11 +108,12 @@ public:
         if (top_blob.empty())
             return -100;
 
+        const int group = hidden_size/group_size;
+        const int part_size = hidden_size/part;
+        const float scale_factor = 1.f / sqrt(head_dim);
+
         if (seq_len == 1) {
             int past_len = in_k_cache.w / hidden_size;
-
-            int group = hidden_size/group_size;
-            int part_size = hidden_size/part;
 
             Mat quant_hidden_states(hidden_size,1u,1,opt.workspace_allocator);
             Mat quant_hidden_states_scale(group,4u,1,opt.workspace_allocator);
@@ -293,7 +294,6 @@ public:
             p_new_query_states = new_query_states;
             p_cache_key_states = cache_key_states;
             float* p_qk = (float*)qk;
-            float scale_factor = 1.f / sqrt(head_dim);
             #pragma omp parallel for num_threads(opt.num_threads)
             for (int q = 0; q < Q; q++) {
                 for (int n = 0; n < N; n++) {
@@ -401,296 +401,385 @@ public:
         }
 
         if (seq_len > 1) {
-            ncnn::Mat query_states(num_heads * head_dim, seq_len, 2u, 1, opt.workspace_allocator);
-            ncnn::Mat key_states(num_heads * head_dim, seq_len, 2u, 1, opt.workspace_allocator);
-            ncnn::Mat value_states(num_heads * head_dim, seq_len, 2u, 1, opt.workspace_allocator);
-            const int* p_q_proj_qweight = (const int*)q_proj_qweight;
-            const int* p_k_proj_qweight = (const int*)k_proj_qweight;
-            const int* p_v_proj_qweight = (const int*)v_proj_qweight;
-            const __fp16* p_q_proj_scales = (const __fp16*)q_proj_scales;
-            const __fp16* p_k_proj_scales = (const __fp16*)k_proj_scales;
-            const __fp16* p_v_proj_scales = (const __fp16*)v_proj_scales;
-            const float16* p_q_bias = q_proj_bias;
-            const float16* p_k_bias = k_proj_bias;
-            const float16* p_v_bias = v_proj_bias;
-            float16* p_query_states = query_states;
-            float16* p_key_states = key_states;
-            float16* p_value_states = value_states;
-            int M = seq_len, K = hidden_size, N = num_heads * head_dim;
-            for (int m = 0; m < M; m++) {
+            const int offset0 = seq_len * head_dim, offset1 = hidden_size;
+            const int half_head_dim = head_dim / 2;
+            const int len = seq_len * head_dim;
+
+            Mat quant_hidden_states(hidden_size * seq_len,1u,1,opt.workspace_allocator);
+            Mat quant_hidden_states_scale(group * seq_len,4u,1,opt.workspace_allocator);
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (int q = 0; q < seq_len; q++)
+            {
+                const __fp16* p_hidden_states = (const __fp16*)hidden_states + q * hidden_size;
+                int8_t* p_quant_hidden_states = (int8_t*)quant_hidden_states + q * hidden_size;
+                float* p_quant_hidden_states_scale = (float*)quant_hidden_states_scale + q * group;
+                for (int i = 0; i < group; i++) {
+                    float max = float(p_hidden_states[i*group_size]);
+                    for (int j = 0; j < group_size; j++) {
+                        max = std::max(max,abs(float(p_hidden_states[i*group_size+j])));
+                    }
+                    for (int j = 0; j < group_size; j++) {
+                        p_quant_hidden_states[i*group_size+j] = int8_t(127.f * float(p_hidden_states[i*group_size+j]) / max);
+                    }
+                    p_quant_hidden_states_scale[i] = max / 127.f;
+                }
+            }
+
+            ncnn::Mat query_states(hidden_size * seq_len, 2u, 1, opt.workspace_allocator);
+            ncnn::Mat key_states(hidden_size * seq_len, 2u, 1, opt.blob_allocator);
+            ncnn::Mat value_states(hidden_size * seq_len, 2u, 1, opt.workspace_allocator);
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (int m = 0; m < seq_len; m++) {
+                const int* p_q_proj_qweight_T = (const int*)q_proj_qweight_T;
+                const int* p_k_proj_qweight_T = (const int*)k_proj_qweight_T;
+                const int* p_v_proj_qweight_T = (const int*)v_proj_qweight_T;
+                const __fp16* p_q_proj_scales_T = (const __fp16*)q_proj_scales_T;
+                const __fp16* p_k_proj_scales_T = (const __fp16*)k_proj_scales_T;
+                const __fp16* p_v_proj_scales_T = (const __fp16*)v_proj_scales_T;
+                const __fp16* p_q_bias = (const __fp16*)q_proj_bias;
+                const __fp16* p_k_bias = (const __fp16*)k_proj_bias;
+                const __fp16* p_v_bias = (const __fp16*)v_proj_bias;
+                __fp16* p_query_states = (__fp16*)query_states + m * hidden_size;
+                __fp16* p_key_states = (__fp16*)key_states + m * hidden_size;
+                __fp16* p_value_states = (__fp16*)value_states + m * hidden_size;
+                for (int n = 0; n < hidden_size; n++) {
+                    const int8_t* p_quant_hidden_states = (const int8_t*)quant_hidden_states + m * hidden_size;
+                    const float* p_quant_hidden_states_scale = (const float*)quant_hidden_states_scale + m * group;
+                    float _tq = float(*p_q_bias++);
+                    float _tk = float(*p_k_bias++);
+                    float _tv = float(*p_v_bias++);
+                    for (int g = 0; g < group; g++) {
+                        int32x4_t _qq = vdupq_n_s32(0);
+                        int32x4_t _qk = vdupq_n_s32(0);
+                        int32x4_t _qv = vdupq_n_s32(0);
+                        for (int k = 0; k+15 < group_size; k+=16) {
+                            register int w0, w1;
+                            register int8_t ww[16];
+
+                            int8x16_t _d = vld1q_s8(p_quant_hidden_states);
+
+                            w0 = *p_q_proj_qweight_T++;
+                            w1 = *p_q_proj_qweight_T++;
+                            ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
+                            ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
+                            ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
+                            ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
+                            ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
+                            ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
+                            ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
+                            ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
+                            ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
+                            ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
+                            ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
+                            ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
+                            ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
+                            ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
+                            ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
+                            ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
+                            _qq = vdotq_s32(_qq,vld1q_s8(ww),_d);
+
+                            w0 = *p_k_proj_qweight_T++;
+                            w1 = *p_k_proj_qweight_T++;
+                            ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
+                            ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
+                            ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
+                            ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
+                            ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
+                            ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
+                            ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
+                            ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
+                            ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
+                            ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
+                            ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
+                            ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
+                            ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
+                            ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
+                            ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
+                            ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
+                            _qk = vdotq_s32(_qk,vld1q_s8(ww),_d);
+                            
+                            w0 = *p_v_proj_qweight_T++;
+                            w1 = *p_v_proj_qweight_T++;
+                            ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
+                            ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
+                            ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
+                            ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
+                            ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
+                            ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
+                            ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
+                            ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
+                            ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
+                            ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
+                            ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
+                            ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
+                            ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
+                            ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
+                            ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
+                            ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
+                            _qv = vdotq_s32(_qv,vld1q_s8(ww),_d);
+
+                            p_quant_hidden_states+=16;
+                        }
+                        _tq += vaddvq_s32(_qq) * float(*p_q_proj_scales_T++) * *p_quant_hidden_states_scale;
+                        _tk += vaddvq_s32(_qk) * float(*p_k_proj_scales_T++) * *p_quant_hidden_states_scale;
+                        _tv += vaddvq_s32(_qv) * float(*p_v_proj_scales_T++) * *p_quant_hidden_states_scale;
+                        p_quant_hidden_states_scale++;
+                    }
+                    *p_query_states = __fp16(_tq);
+                    *p_key_states = __fp16(_tk);
+                    *p_value_states = __fp16(_tv);
+
+                    p_query_states++;
+                    p_key_states++;
+                    p_value_states++;
+                }
+            }
+
+            ncnn::Mat new_query_states(hidden_size * seq_len, 2u, 1, opt.workspace_allocator);
+            ncnn::Mat new_key_states(hidden_size * seq_len, 2u, 1, opt.workspace_allocator);
+            ncnn::Mat new_value_states(hidden_size * seq_len, 2u, 1, opt.blob_allocator);
+            {
+                const __fp16* p_query_states = (const __fp16*)query_states; // 输入
+                const __fp16* p_key_states = (const __fp16*)key_states;
+                const __fp16* p_value_states = (const __fp16*)value_states;
+                __fp16* p_new_query_states = (__fp16*)new_query_states; // 输出
+                __fp16* p_new_key_states = (__fp16*)new_key_states;
+                __fp16* p_new_value_states = (__fp16*)new_value_states;
                 #pragma omp parallel for num_threads(opt.num_threads)
-                for (int n = 0; n < N; n++) {
-                    float16x8_t _t0 = vdupq_n_f16((__fp16)0.f);
-                    float16x8_t _t1 = vdupq_n_f16((__fp16)0.f);
-                    float16x8_t _t2 = vdupq_n_f16((__fp16)0.f);
-                    const __fp16* p_hidden_states = (const __fp16*)hidden_states + m*K;
-                    for (int k = 0; k+7 < K; k+=8) {
-                        register int w;
-                        register __fp16 ww[8];
-
-                        float16x8_t _d = vld1q_f16(p_hidden_states);
-
-                        w = p_q_proj_qweight[k/part * N + n];
-                        ww[0] = (__fp16)(((w >> 0) & mask) - zeros);
-                        ww[1] = (__fp16)(((w >> 4) & mask) - zeros);
-                        ww[2] = (__fp16)(((w >> 8) & mask) - zeros);
-                        ww[3] = (__fp16)(((w >> 12) & mask) - zeros);
-                        ww[4] = (__fp16)(((w >> 16) & mask) - zeros);
-                        ww[5] = (__fp16)(((w >> 20) & mask) - zeros);
-                        ww[6] = (__fp16)(((w >> 24) & mask) - zeros);
-                        ww[7] = (__fp16)(((w >> 28) & mask) - zeros);
-                        _t0 = vfmaq_f16(_t0,vmulq_f16(_d,vdupq_n_f16(p_q_proj_scales[k/group_size * N + n])),vld1q_f16(ww));
-
-                        w = p_k_proj_qweight[k/part * N + n];
-                        ww[0] = (__fp16)(((w >> 0) & mask) - zeros);
-                        ww[1] = (__fp16)(((w >> 4) & mask) - zeros);
-                        ww[2] = (__fp16)(((w >> 8) & mask) - zeros);
-                        ww[3] = (__fp16)(((w >> 12) & mask) - zeros);
-                        ww[4] = (__fp16)(((w >> 16) & mask) - zeros);
-                        ww[5] = (__fp16)(((w >> 20) & mask) - zeros);
-                        ww[6] = (__fp16)(((w >> 24) & mask) - zeros);
-                        ww[7] = (__fp16)(((w >> 28) & mask) - zeros);
-                        _t1 = vfmaq_f16(_t1,vmulq_f16(_d,vdupq_n_f16(p_k_proj_scales[k/group_size * N + n])),vld1q_f16(ww));
-
-                        w = p_v_proj_qweight[k/part * N + n];
-                        ww[0] = (__fp16)(((w >> 0) & mask) - zeros);
-                        ww[1] = (__fp16)(((w >> 4) & mask) - zeros);
-                        ww[2] = (__fp16)(((w >> 8) & mask) - zeros);
-                        ww[3] = (__fp16)(((w >> 12) & mask) - zeros);
-                        ww[4] = (__fp16)(((w >> 16) & mask) - zeros);
-                        ww[5] = (__fp16)(((w >> 20) & mask) - zeros);
-                        ww[6] = (__fp16)(((w >> 24) & mask) - zeros);
-                        ww[7] = (__fp16)(((w >> 28) & mask) - zeros);
-                        _t2 = vfmaq_f16(_t2,vmulq_f16(_d,vdupq_n_f16(p_v_proj_scales[k/group_size * N + n])),vld1q_f16(ww));
-
-                        p_hidden_states += 8;
+                for (int x = 0; x < num_heads; x++) {
+                    for (int y = 0; y < seq_len; y++) {
+                        memcpy(p_new_query_states + x*offset0 + y*head_dim, p_query_states + x*head_dim + y*offset1, head_dim * 2u);
+                        memcpy(p_new_key_states + x*offset0 + y*head_dim, p_key_states + x*head_dim + y*offset1, head_dim * 2u);
+                        memcpy(p_new_value_states + x*offset0 + y*head_dim, p_value_states + x*head_dim + y*offset1, head_dim * 2u);
                     }
-                    p_query_states[m*N+n] = float32_to_float16(float16_to_float32(p_q_bias[n]) + vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(_t0)), vcvt_f32_f16(vget_high_f16(_t0)))));
-                    p_key_states[m*N+n] = float32_to_float16(float16_to_float32(p_k_bias[n]) + vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(_t1)), vcvt_f32_f16(vget_high_f16(_t1)))));
-                    p_value_states[m*N+n] = float32_to_float16(float16_to_float32(p_v_bias[n]) + vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(_t2)), vcvt_f32_f16(vget_high_f16(_t2)))));
                 }
             }
 
-            ncnn::Mat new_query_states(num_heads * head_dim * seq_len, 2u, 1, opt.workspace_allocator);
-            ncnn::Mat new_key_states(num_heads * head_dim * seq_len, 2u, 1, opt.workspace_allocator);
-            ncnn::Mat new_value_states(num_heads * head_dim * seq_len, 2u, 1, opt.workspace_allocator);
+            {
+                const __fp16* p_new_query_states = (const __fp16*)new_query_states; // 输入
+                const __fp16* p_new_key_states = (const __fp16*)new_key_states; // 输入
+                __fp16* p_query_states = (__fp16*)query_states; // 输出
+                __fp16* p_key_states = (__fp16*)key_states; // 输出
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int i = 0; i < num_heads; i++) {
+                    const __fp16* p_q_in = (const __fp16*)p_new_query_states + i * len;
+                    const __fp16* p_k_in = (const __fp16*)p_new_key_states + i * len;
+                    __fp16* p_q_out = (__fp16*)p_query_states + i * len;
+                    __fp16* p_k_out = (__fp16*)p_key_states + i * len;
+                    for (int j = 0; j < seq_len; j++) {
+                        const float* p_cos = (const float*)rotary_emb_cos_cached + j * head_dim; // cos
+                        const float* p_sin = (const float*)rotary_emb_sin_cached + j * head_dim; // sin
+                        for (int k = 0; k+3 < half_head_dim; k+=4) {
+                            float32x4_t _q0 = vcvt_f32_f16(vld1_f16(p_q_in));
+                            float32x4_t _q1 = vcvt_f32_f16(vld1_f16(p_q_in + half_head_dim));
+                            float32x4_t _k0 = vcvt_f32_f16(vld1_f16(p_k_in));
+                            float32x4_t _k1 = vcvt_f32_f16(vld1_f16(p_k_in + half_head_dim));
 
-            p_query_states = query_states;
-            p_key_states = key_states;
-            p_value_states = value_states;
-            float16* p_new_query_states = new_query_states;
-            float16* p_new_key_states = new_key_states;
-            float16* p_new_value_states = new_value_states;
-            int offset0 = seq_len*head_dim;
-            int offset1 = num_heads*head_dim;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int x = 0; x < num_heads; x++) {
-                for (int y = 0; y < seq_len; y++) {
-                    memcpy(p_new_query_states + x*offset0 + y*head_dim, p_query_states + x*head_dim + y*offset1, head_dim * 2u);
-                    memcpy(p_new_key_states + x*offset0 + y*head_dim, p_key_states + x*head_dim + y*offset1, head_dim * 2u);
-                    memcpy(p_new_value_states + x*offset0 + y*head_dim, p_value_states + x*head_dim + y*offset1, head_dim * 2u);
-                }
-            }
+                            float32x4_t _cos0 = vld1q_f32(p_cos);
+                            float32x4_t _sin0 = vld1q_f32(p_sin);
 
-            p_new_query_states = new_query_states; // 输入
-            p_new_key_states = new_key_states; // 输入
-            p_query_states = query_states; // 输出
-            p_key_states = key_states; // 输出
-            int half_head_dim = head_dim / 2;
-            int len = seq_len * head_dim;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int i = 0; i < num_heads; i++) {
-                const __fp16* p_q_in = (const __fp16*)p_new_query_states + i * len;
-                const __fp16* p_k_in = (const __fp16*)p_new_key_states + i * len;
-                __fp16* p_q_out = (__fp16*)p_query_states + i * len;
-                __fp16* p_k_out = (__fp16*)p_key_states + i * len;
-                for (int j = 0; j < seq_len; j++) {
-                    const float* p_cos = (const float*)rotary_emb_cos_cached + j * head_dim; // cos
-                    const float* p_sin = (const float*)rotary_emb_sin_cached + j * head_dim; // sin
-                    for (int k = 0; k+3 < half_head_dim; k+=4) {
-                        float32x4_t _q0 = vcvt_f32_f16(vld1_f16(p_q_in));
-                        float32x4_t _q1 = vcvt_f32_f16(vld1_f16(p_q_in + half_head_dim));
-                        float32x4_t _k0 = vcvt_f32_f16(vld1_f16(p_k_in));
-                        float32x4_t _k1 = vcvt_f32_f16(vld1_f16(p_k_in + half_head_dim));
+                            float16x4_t _r0q = vcvt_f16_f32(vsubq_f32(vmulq_f32(_cos0,_q0),vmulq_f32(_sin0,_q1)));
+                            vst1_f16(p_q_out, _r0q);
+                            float16x4_t _r0k = vcvt_f16_f32(vsubq_f32(vmulq_f32(_cos0,_k0),vmulq_f32(_sin0,_k1)));
+                            vst1_f16(p_k_out, _r0k);
 
-                        float32x4_t _cos0 = vld1q_f32(p_cos);
-                        float32x4_t _sin0 = vld1q_f32(p_sin);
+                            float32x4_t _cos1 = vld1q_f32(p_cos + half_head_dim);
+                            float32x4_t _sin1 = vld1q_f32(p_sin + half_head_dim);
 
-                        float16x4_t _r0q = vcvt_f16_f32(vsubq_f32(vmulq_f32(_cos0,_q0),vmulq_f32(_sin0,_q1)));
-                        vst1_f16(p_q_out, _r0q);
-                        float16x4_t _r0k = vcvt_f16_f32(vsubq_f32(vmulq_f32(_cos0,_k0),vmulq_f32(_sin0,_k1)));
-                        vst1_f16(p_k_out, _r0k);
+                            float16x4_t _r1q = vcvt_f16_f32(vaddq_f32(vmulq_f32(_cos1,_q1),vmulq_f32(_sin1,_q0)));
+                            vst1_f16(p_q_out + half_head_dim, _r1q);
+                            float16x4_t _r1k = vcvt_f16_f32(vaddq_f32(vmulq_f32(_cos1,_k1),vmulq_f32(_sin1,_k0)));
+                            vst1_f16(p_k_out + half_head_dim, _r1k);
 
-                        float32x4_t _cos1 = vld1q_f32(p_cos + half_head_dim);
-                        float32x4_t _sin1 = vld1q_f32(p_sin + half_head_dim);
-
-                        float16x4_t _r1q = vcvt_f16_f32(vaddq_f32(vmulq_f32(_cos1,_q1),vmulq_f32(_sin1,_q0)));
-                        vst1_f16(p_q_out + half_head_dim, _r1q);
-                        float16x4_t _r1k = vcvt_f16_f32(vaddq_f32(vmulq_f32(_cos1,_k1),vmulq_f32(_sin1,_k0)));
-                        vst1_f16(p_k_out + half_head_dim, _r1k);
-
-                        p_cos+=4;
-                        p_sin+=4;
-                        p_q_in+=4;
-                        p_k_in+=4;
-                        p_q_out+=4;
-                        p_k_out+=4;
+                            p_cos+=4;
+                            p_sin+=4;
+                            p_q_in+=4;
+                            p_k_in+=4;
+                            p_q_out+=4;
+                            p_k_out+=4;
+                        }
+                        p_q_in+=half_head_dim;
+                        p_k_in+=half_head_dim;
+                        p_q_out+=half_head_dim;
+                        p_k_out+=half_head_dim;
                     }
-                    p_q_in+=half_head_dim;
-                    p_k_in+=half_head_dim;
-                    p_q_out+=half_head_dim;
-                    p_k_out+=half_head_dim;
                 }
             }
 
             // set kv cache
-            out_k_cache = key_states.reshape(num_heads * head_dim * seq_len, opt.blob_allocator);
-            out_v_cache = new_value_states.reshape(num_heads * head_dim * seq_len, opt.blob_allocator);
+            out_k_cache = key_states;
+            out_v_cache = new_value_states;
 
             ncnn::Mat qk(num_heads * seq_len * seq_len, 4u, 1, opt.workspace_allocator);
-            int Q = num_heads;
-            M = seq_len;
-            K = head_dim;
-            N = seq_len;
-            p_query_states = query_states;
-            p_key_states = key_states;
-            float* p_qk = qk;
-            float scale_factor = 1.f / sqrt(head_dim);
-            int MK = M*K, NK = N*K, MN = M*N;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int q = 0; q < Q; q++) {
-                float* _p_qk = p_qk + q*MN;
-                for (int m = 0; m < M; m++) {
-                    for (int n = 0; n < N; n++) {
-                        if (m < n) {
-                            *_p_qk = -FLOAT_INF;
-                        }
-                        else {
-                            float16x8_t _qk = vdupq_n_f16((__fp16)0.f);
-                            const __fp16* p_d = (const __fp16*)p_query_states + q*MK + m*K;
-                            const __fp16* p_w = (const __fp16*)p_key_states + q*NK + n*K;
-                            for (int k = 0; k+7 < K; k+=8) {
-                                float16x8_t _d = vld1q_f16(p_d);
-                                float16x8_t _w = vld1q_f16(p_w);
-                                _qk = vfmaq_f16(_qk,_d,_w);
-                                p_d+=8;
-                                p_w+=8;
+            {
+                const __fp16* p_query_states = (const __fp16*)query_states;
+                const __fp16* p_key_states = (const __fp16*)key_states;
+                float* p_qk = (float*)qk;
+                const int Q = num_heads, M = seq_len, K = head_dim, N = seq_len;
+                const int MK = M*K, NK = N*K, MN = M*N;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int q = 0; q < Q; q++) {
+                    float* _p_qk = p_qk + q*MN;
+                    for (int m = 0; m < M; m++) {
+                        for (int n = 0; n < N; n++) {
+                            if (m < n) {
+                                *_p_qk = -FLOAT_INF;
                             }
-                            *_p_qk = scale_factor * vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(_qk)), vcvt_f32_f16(vget_high_f16(_qk))));
+                            else {
+                                float16x8_t _qk = vdupq_n_f16((__fp16)0.f);
+                                const __fp16* p_d = (const __fp16*)p_query_states + q*MK + m*K;
+                                const __fp16* p_w = (const __fp16*)p_key_states + q*NK + n*K;
+                                for (int k = 0; k+7 < K; k+=8) {
+                                    float16x8_t _d = vld1q_f16(p_d);
+                                    float16x8_t _w = vld1q_f16(p_w);
+                                    _qk = vfmaq_f16(_qk,_d,_w);
+                                    p_d+=8;
+                                    p_w+=8;
+                                }
+                                *_p_qk = scale_factor * vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(_qk)), vcvt_f32_f16(vget_high_f16(_qk))));
+                            }
+                            _p_qk++;
                         }
-                        _p_qk++;
                     }
                 }
             }
 
-            p_qk = qk;
-            int L = seq_len, S = seq_len;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int q = 0; q < Q; q++) {
-                for (int l = 0; l < L; l++) {
-                    float max = -FLT_MAX;
-                    float32x4_t _max = vdupq_n_f32(-FLT_MAX);
-                    int s = 0;
-                    for (; s+3 < S; s+=4) {
-                        _max = vmaxq_f32(_max, vld1q_f32(p_qk + q*L*S + l*S + s));
-                    }
-                    for (; s < S; s++) {
-                        max = std::max(max, p_qk[q*L*S + l*S + s]);
-                    }
-                    max = std::max(max,vmaxvq_f32(_max));
-                    float sum = 0.f;
-                    s = 0;
-                    for (; s < S; s++) {
-                        p_qk[q*L*S + l*S + s] = expf(p_qk[q*L*S + l*S + s] - max);
-                        sum += p_qk[q*L*S + l*S + s];
-                    }
-                    sum = 1.f / sum;
-                    float32x4_t _sum = vdupq_n_f32(sum);
-                    s = 0;
-                    for (; s+3 < S; s+=4) {
-                        float32x4_t _p = vld1q_f32(p_qk + q*L*S + l*S + s);
-                        _p = vmulq_f32(_p, _sum);
-                        vst1q_f32(p_qk + q*L*S + l*S + s, _p);
-                    }
-                    for (; s < S; s++) {
-                        p_qk[q*L*S + l*S + s] *= sum;
-                    }
-                }
-            }
-            Q = num_heads;
-            M = seq_len;
-            K = seq_len;
-            N = head_dim;
-            p_qk = qk;
-            p_new_value_states = new_value_states;
-            ncnn::Mat qkv(num_heads * seq_len * head_dim, 2u, 1, opt.workspace_allocator);
-            float16* p_qkv = qkv;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int q = 0; q < Q; q++) {
-                for (int m = 0; m < M; m++) {
-                    for (int n = 0; n < N; n++) {
-                        float tmp = 0.f;
-                        for (int k = 0; k < K; k++) {
-                            tmp += p_qk[q*M*K + m*K + k] * float16_to_float32(p_new_value_states[q*K*N + k*N + n]);
+            {
+                float* p_qk = (float*)qk;
+                const int Q = num_heads, L = seq_len, S = seq_len;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int q = 0; q < Q; q++) {
+                    for (int l = 0; l < L; l++) {
+                        float max = -FLT_MAX;
+                        float32x4_t _max = vdupq_n_f32(-FLT_MAX);
+                        int s = 0;
+                        for (; s+3 < S; s+=4) {
+                            _max = vmaxq_f32(_max, vld1q_f32(p_qk + q*L*S + l*S + s));
                         }
-                        p_qkv[q*M*N + m*N + n] = float32_to_float16(tmp);
+                        for (; s < S; s++) {
+                            max = std::max(max, p_qk[q*L*S + l*S + s]);
+                        }
+                        max = std::max(max,vmaxvq_f32(_max));
+                        float sum = 0.f;
+                        s = 0;
+                        for (; s < S; s++) {
+                            p_qk[q*L*S + l*S + s] = expf(p_qk[q*L*S + l*S + s] - max);
+                            sum += p_qk[q*L*S + l*S + s];
+                        }
+                        sum = 1.f / sum;
+                        float32x4_t _sum = vdupq_n_f32(sum);
+                        s = 0;
+                        for (; s+3 < S; s+=4) {
+                            float32x4_t _p = vld1q_f32(p_qk + q*L*S + l*S + s);
+                            _p = vmulq_f32(_p, _sum);
+                            vst1q_f32(p_qk + q*L*S + l*S + s, _p);
+                        }
+                        for (; s < S; s++) {
+                            p_qk[q*L*S + l*S + s] *= sum;
+                        }
                     }
                 }
             }
 
-            p_qkv = qkv;
-            p_value_states = value_states;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int x = 0; x < seq_len; x++) {
-                for (int y = 0; y < num_heads; y++) {
-                    memcpy(p_value_states + x*num_heads*head_dim + y*head_dim, p_qkv + y*seq_len*head_dim + x*head_dim, head_dim * 2u);
-                }
-            }
-
-            float16* p_top_blob = (float16*)top_blob;
-            M = hidden_states.h;
-            K = num_heads * head_dim;
-            N = hidden_size;
-            const int* p_o_proj_qweight = (const int*)o_proj_qweight;
-            const __fp16* p_o_proj_scales = (const __fp16*)o_proj_scales;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int m = 0; m < M; m++) {
-                for (int n = 0; n < N; n++) {
-                    float16x8_t _tmp = vdupq_n_f16((__fp16)0.f);
-                    const __fp16* p_value_states = (const __fp16*)value_states + m*K;
-                    for (int k = 0; k+7 < K; k+=8) {
-                        register int w;
-                        register __fp16 ww[8];
-
-                        float16x8_t _d = vld1q_f16(p_value_states);
-
-                        w = p_o_proj_qweight[k/part * N + n];
-                        ww[0] = (__fp16)(((w >> 0) & mask) - zeros);
-                        ww[1] = (__fp16)(((w >> 4) & mask) - zeros);
-                        ww[2] = (__fp16)(((w >> 8) & mask) - zeros);
-                        ww[3] = (__fp16)(((w >> 12) & mask) - zeros);
-                        ww[4] = (__fp16)(((w >> 16) & mask) - zeros);
-                        ww[5] = (__fp16)(((w >> 20) & mask) - zeros);
-                        ww[6] = (__fp16)(((w >> 24) & mask) - zeros);
-                        ww[7] = (__fp16)(((w >> 28) & mask) - zeros);
-                        _tmp = vfmaq_f16(_tmp,vmulq_f16(_d,vdupq_n_f16(p_o_proj_scales[k/group_size * N + n])),vld1q_f16(ww));
-
-                        p_value_states+=8;
+            ncnn::Mat qkv(hidden_size * seq_len, 2u, 1, opt.workspace_allocator);
+            {
+                const float* p_qk = (const float*)qk;
+                const __fp16* p_new_value_states = (const __fp16*)new_value_states;
+                __fp16* p_qkv = qkv;
+                const int Q = num_heads, M = seq_len, K = seq_len, N = head_dim;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int q = 0; q < Q; q++) {
+                    for (int m = 0; m < M; m++) {
+                        for (int n = 0; n < N; n++) {
+                            float tmp = 0.f;
+                            for (int k = 0; k < K; k++) {
+                                tmp += p_qk[q*M*K + m*K + k] * float(p_new_value_states[q*K*N + k*N + n]);
+                            }
+                            p_qkv[q*M*N + m*N + n] = __fp16(tmp);
+                        }
                     }
-                    p_top_blob[m*N+n] = float32_to_float16(vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(_tmp)), vcvt_f32_f16(vget_high_f16(_tmp)))));
                 }
             }
+
+            {
+                const __fp16* p_qkv = (const __fp16*)qkv;
+                __fp16* p_value_states = value_states;
+                #pragma omp parallel for num_threads(opt.num_threads)
+                for (int x = 0; x < seq_len; x++) {
+                    for (int y = 0; y < num_heads; y++) {
+                        memcpy(p_value_states + x*hidden_size + y*head_dim, p_qkv + y*offset0 + x*head_dim, head_dim * 2u);
+                    }
+                }
+            }
+
+            Mat quant_qkv(hidden_size * seq_len,1u,1,opt.workspace_allocator);
+            Mat quant_qkv_scale(group * seq_len,4u,1,opt.workspace_allocator);
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (int q = 0; q < seq_len; q++)
+            {
+                const __fp16* p_qkv = (const __fp16*)value_states + q * hidden_size;
+                int8_t* p_quant_qkv = (int8_t*)quant_qkv + q * hidden_size;
+                float* p_quant_qkv_scale = (float*)quant_qkv_scale + q * group;
+                for (int i = 0; i < group; i++) {
+                    float max = float(p_qkv[i*group_size]);
+                    for (int j = 0; j < group_size; j++) {
+                        max = std::max(max,abs(float(p_qkv[i*group_size+j])));
+                    }
+                    for (int j = 0; j < group_size; j++) {
+                        p_quant_qkv[i*group_size+j] = int8_t(127.f * float(p_qkv[i*group_size+j]) / max);
+                    }
+                    p_quant_qkv_scale[i] = max / 127.f;
+                }
+            }
+
+            #pragma omp parallel for num_threads(opt.num_threads)
+            for (int m = 0; m < seq_len; m++) {
+                __fp16* p_top_blob = (__fp16*)top_blob + m * hidden_size;
+                for (int n = 0; n < hidden_size; n++) {
+                    const int8_t* p_quant_qkv = (int8_t*)quant_qkv + m * hidden_size;
+                    const float* p_quant_qkv_scale = (float*)quant_qkv_scale + m * group;
+                    const __fp16* p_o_proj_scales_T = (const __fp16*)o_proj_scales_T + n * group;
+                    const uint32_t* p_o_proj_qweight_T = (const uint32_t*)o_proj_qweight_T + n * part_size;
+                    float _tmp = 0.f;
+                    for (int g = 0; g < group; g++) {
+                        int32x4_t _qtmp = vdupq_n_s32(0);
+                        for (int k = 0; k+15 < group_size; k+=16) {
+                            register int w0, w1;
+                            register int8_t ww[16];
+                            w0 = *p_o_proj_qweight_T++;
+                            w1 = *p_o_proj_qweight_T++;
+                            ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
+                            ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
+                            ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
+                            ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
+                            ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
+                            ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
+                            ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
+                            ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
+                            ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
+                            ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
+                            ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
+                            ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
+                            ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
+                            ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
+                            ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
+                            ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
+                            int8x16_t _w = vld1q_s8(ww);
+                            int8x16_t _d = vld1q_s8(p_quant_qkv);
+                            _qtmp = vdotq_s32(_qtmp,_w,_d);
+                            p_quant_qkv+=16;
+                        }
+                        _tmp += vaddvq_s32(_qtmp) * float(*p_o_proj_scales_T++) * *p_quant_qkv_scale++;
+                    }
+                    *p_top_blob = __fp16(_tmp);
+                    p_top_blob++;
+                }
+            }
+
             return 0;
         }
         return 0;
     }
-
-    float dequant(int hh, int ww, int wW, int sW, const int* qweight, const float16* scales) const {
-        float s = float16_to_float32(scales[hh/group_size * sW + ww]);
-        int w = (qweight[hh/part * wW + ww] >> (bits * (hh%part))) & mask;
-        return s * (w - zeros);
-    }
-
 public:
     // param
     int hidden_size;
@@ -702,15 +791,10 @@ public:
     uint8_t mask;
     uint8_t zeros;
     // model
-    Mat q_proj_qweight_T, q_proj_scales_T;
-    Mat k_proj_qweight_T, k_proj_scales_T;
-    Mat v_proj_qweight_T, v_proj_scales_T;
+    Mat q_proj_qweight_T, q_proj_scales_T, q_proj_bias;
+    Mat k_proj_qweight_T, k_proj_scales_T, k_proj_bias;
+    Mat v_proj_qweight_T, v_proj_scales_T, v_proj_bias;
     Mat o_proj_qweight_T, o_proj_scales_T;
-
-    Mat q_proj_qweight, q_proj_scales, q_proj_bias;
-    Mat k_proj_qweight, k_proj_scales, k_proj_bias;
-    Mat v_proj_qweight, v_proj_scales, v_proj_bias;
-    Mat o_proj_qweight, o_proj_scales;
     Mat rotary_emb_cos_cached, rotary_emb_sin_cached;
 };
 DEFINE_LAYER_CREATOR(Qwen2AttentionLayer)
@@ -1625,23 +1709,23 @@ public:
                     string layer_name = join(vector<string>(token.begin(),token.end()-2),'.');
                     Qwen2AttentionLayer* layer = (Qwen2AttentionLayer*)get_layer(layer_name,layers);
                     ncnn::Mat data = load_weight(tensor,databuffer,false);
-                    if      (weight_name == "q_proj.qweight")   { layer->q_proj_qweight   = data; layer->q_proj_qweight_T = transpose(data,opt); }
-                    else if (weight_name == "q_proj.scales")    { layer->q_proj_scales    = data; layer->q_proj_scales_T = transpose(data,opt); }
+                    if      (weight_name == "q_proj.qweight")   layer->q_proj_qweight_T = transpose(data,opt);
+                    else if (weight_name == "q_proj.scales")    layer->q_proj_scales_T = transpose(data,opt);
                     else if (weight_name == "q_proj.bias")      layer->q_proj_bias      = data;
                     else if (weight_name == "q_proj.g_idx")     {}
                     else if (weight_name == "q_proj.qzeros")    {}
-                    else if (weight_name == "k_proj.qweight")   { layer->k_proj_qweight   = data; layer->k_proj_qweight_T = transpose(data,opt); }
-                    else if (weight_name == "k_proj.scales")    { layer->k_proj_scales    = data; layer->k_proj_scales_T = transpose(data,opt); }
+                    else if (weight_name == "k_proj.qweight")   layer->k_proj_qweight_T = transpose(data,opt);
+                    else if (weight_name == "k_proj.scales")    layer->k_proj_scales_T = transpose(data,opt);
                     else if (weight_name == "k_proj.bias")      layer->k_proj_bias      = data;
                     else if (weight_name == "k_proj.g_idx")     {}
                     else if (weight_name == "k_proj.qzeros")    {}
-                    else if (weight_name == "v_proj.qweight")   { layer->v_proj_qweight   = data; layer->v_proj_qweight_T = transpose(data,opt); }
-                    else if (weight_name == "v_proj.scales")    { layer->v_proj_scales    = data; layer->v_proj_scales_T = transpose(data,opt); }
+                    else if (weight_name == "v_proj.qweight")   layer->v_proj_qweight_T = transpose(data,opt);
+                    else if (weight_name == "v_proj.scales")    layer->v_proj_scales_T = transpose(data,opt);
                     else if (weight_name == "v_proj.bias")      layer->v_proj_bias      = data;
                     else if (weight_name == "v_proj.g_idx")     {}
                     else if (weight_name == "v_proj.qzeros")    {}
-                    else if (weight_name == "o_proj.qweight")   { layer->o_proj_qweight   = data; layer->o_proj_qweight_T = transpose(data,opt); }
-                    else if (weight_name == "o_proj.scales")    { layer->o_proj_scales    = data; layer->o_proj_scales_T = transpose(data,opt); }
+                    else if (weight_name == "o_proj.qweight")   layer->o_proj_qweight_T = transpose(data,opt);
+                    else if (weight_name == "o_proj.scales")    layer->o_proj_scales_T = transpose(data,opt);
                     else if (weight_name == "o_proj.g_idx")     {}
                     else if (weight_name == "o_proj.qzeros")    {}
                     else if (weight_name == "o_proj.bias")      {}
@@ -1844,8 +1928,9 @@ public:
 };
 
 int main(int argc, char **argv) {
-    std::string modelpath = "Qwen1.5-0.5B-Chat-GPTQ-Int4";
+    std::string modelpath = "Qwen1.5-4B-Chat-GPTQ-Int4";
     string user_prompt = "Hello! How are you?";
+    user_prompt = "windows、linux和macos的异同点分别是什么？";
 
     if (argc > 1) {
         modelpath = argv[1];
