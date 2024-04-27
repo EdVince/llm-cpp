@@ -3,7 +3,9 @@
 ### Speed up
 In M1 chip:
 ***Qwen1.5-0.5B-Chat-GPTQ-Int4***: 66 token/s
+
 ***Qwen1.5-1.8B-Chat-GPTQ-Int4***: 21 token/s
+
 ***Qwen1.5-4B-Chat-GPTQ-Int4***: 9 token/s
 
 ### Implement & Feature detail
