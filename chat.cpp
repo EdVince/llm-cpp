@@ -1674,33 +1674,31 @@ public:
 
                 if (key.find("model.embed_tokens") != std::string::npos) {
                     // share weight
-                    ncnn::Mat data = load_weight(tensor,databuffer,false);
-                    auto [quant_weight,weight_scale] = quant_embed(data,opt);
+                    ncnn::Mat data = load_weight(tensor,databuffer);
                     {
                         EmbeddingLayer* layer = (EmbeddingLayer*)get_layer("model.embed_tokens",layers);
-                        layer->quant_weight = quant_weight;
-                        layer->weight_scale = weight_scale;
+                        if (key.find("quant") != std::string::npos) layer->quant_weight = data;
+                        else if (key.find("scale") != std::string::npos) layer->weight_scale = data;
+                        else { cout << "erro key: "; show_tensor_info(key,tensor); }
                     }
                     {
                         LMHeadLayer* layer = (LMHeadLayer*)get_layer("lm_head",layers);
-                        if (layer->quant_weight.empty()) {
-                            layer->quant_weight = quant_weight;
-                            layer->weight_scale = weight_scale;
-                        }
+                        if (key.find("quant") != std::string::npos && layer->quant_weight.empty()) layer->quant_weight = data;
+                        else if (key.find("scale") != std::string::npos && layer->weight_scale.empty()) layer->weight_scale = data;
                     }
                 }
                 else if (key.find("lm_head") != std::string::npos) {
-                    ncnn::Mat data = load_weight(tensor,databuffer,false);
-                    auto [quant_weight,weight_scale] = quant_embed(data,opt);
+                    ncnn::Mat data = load_weight(tensor,databuffer);
                     LMHeadLayer* layer = (LMHeadLayer*)get_layer("lm_head",layers);
-                    layer->quant_weight = quant_weight;
-                    layer->weight_scale = weight_scale;
+                    if (key.find("quant") != std::string::npos) layer->quant_weight = data;
+                    else if (key.find("scale") != std::string::npos) layer->weight_scale = data;
+                    else { cout << "erro key: "; show_tensor_info(key,tensor); }
                 }
                 else if ((key.find("layernorm.weight") != std::string::npos) || (key.find("model.norm") != std::string::npos)) {
                     vector<string> token = split(key,'.');
                     string layer_name = join(vector<string>(token.begin(),token.end()-1),'.');
                     Qwen2RMSNormLayer* layer = (Qwen2RMSNormLayer*)get_layer(layer_name,layers);
-                    ncnn::Mat data = load_weight(tensor,databuffer,false);
+                    ncnn::Mat data = load_weight(tensor,databuffer);
                     layer->weight_data = data;
                 }
                 else if ((key.find("model.layers.") != std::string::npos) && (key.find(".self_attn") != std::string::npos)) {
@@ -1708,27 +1706,18 @@ public:
                     string weight_name = join(vector<string>(token.end()-2,token.end()),'.');
                     string layer_name = join(vector<string>(token.begin(),token.end()-2),'.');
                     Qwen2AttentionLayer* layer = (Qwen2AttentionLayer*)get_layer(layer_name,layers);
-                    ncnn::Mat data = load_weight(tensor,databuffer,false);
-                    if      (weight_name == "q_proj.qweight")   layer->q_proj_qweight_T = transpose(data,opt);
-                    else if (weight_name == "q_proj.scales")    layer->q_proj_scales_T = transpose(data,opt);
+                    ncnn::Mat data = load_weight(tensor,databuffer);
+                    if      (weight_name == "q_proj.qweight")   layer->q_proj_qweight_T = data;
+                    else if (weight_name == "q_proj.scales")    layer->q_proj_scales_T = data;
                     else if (weight_name == "q_proj.bias")      layer->q_proj_bias      = data;
-                    else if (weight_name == "q_proj.g_idx")     {}
-                    else if (weight_name == "q_proj.qzeros")    {}
-                    else if (weight_name == "k_proj.qweight")   layer->k_proj_qweight_T = transpose(data,opt);
-                    else if (weight_name == "k_proj.scales")    layer->k_proj_scales_T = transpose(data,opt);
+                    else if (weight_name == "k_proj.qweight")   layer->k_proj_qweight_T = data;
+                    else if (weight_name == "k_proj.scales")    layer->k_proj_scales_T = data;
                     else if (weight_name == "k_proj.bias")      layer->k_proj_bias      = data;
-                    else if (weight_name == "k_proj.g_idx")     {}
-                    else if (weight_name == "k_proj.qzeros")    {}
-                    else if (weight_name == "v_proj.qweight")   layer->v_proj_qweight_T = transpose(data,opt);
-                    else if (weight_name == "v_proj.scales")    layer->v_proj_scales_T = transpose(data,opt);
+                    else if (weight_name == "v_proj.qweight")   layer->v_proj_qweight_T = data;
+                    else if (weight_name == "v_proj.scales")    layer->v_proj_scales_T = data;
                     else if (weight_name == "v_proj.bias")      layer->v_proj_bias      = data;
-                    else if (weight_name == "v_proj.g_idx")     {}
-                    else if (weight_name == "v_proj.qzeros")    {}
-                    else if (weight_name == "o_proj.qweight")   layer->o_proj_qweight_T = transpose(data,opt);
-                    else if (weight_name == "o_proj.scales")    layer->o_proj_scales_T = transpose(data,opt);
-                    else if (weight_name == "o_proj.g_idx")     {}
-                    else if (weight_name == "o_proj.qzeros")    {}
-                    else if (weight_name == "o_proj.bias")      {}
+                    else if (weight_name == "o_proj.qweight")   layer->o_proj_qweight_T = data;
+                    else if (weight_name == "o_proj.scales")    layer->o_proj_scales_T = data;
                     else { cout << "erro key: "; show_tensor_info(key,tensor); }
                     if (layer->rotary_emb_cos_cached.empty() || layer->rotary_emb_sin_cached.empty()) {
                         layer->rotary_emb_cos_cached = rotary_emb_cos_cached;
@@ -1740,24 +1729,16 @@ public:
                     string weight_name = join(vector<string>(token.end()-2,token.end()),'.');
                     string layer_name = join(vector<string>(token.begin(),token.end()-2),'.');
                     Qwen2MLPLayer* layer = (Qwen2MLPLayer*)get_layer(layer_name,layers);
-                    ncnn::Mat data = load_weight(tensor,databuffer,false);
-                    if      (weight_name == "gate_proj.qweight")    layer->gate_proj_qweight_T  = transpose(data,opt);
-                    else if (weight_name == "gate_proj.scales")     layer->gate_proj_scales_T   = transpose(data,opt);
-                    else if (weight_name == "gate_proj.bias")       {}
-                    else if (weight_name == "gate_proj.g_idx")      {}
-                    else if (weight_name == "gate_proj.qzeros")     {}
-                    else if (weight_name == "up_proj.qweight")      layer->up_proj_qweight_T    = transpose(data,opt);
-                    else if (weight_name == "up_proj.scales")       layer->up_proj_scales_T     = transpose(data,opt);
-                    else if (weight_name == "up_proj.bias")         {}
-                    else if (weight_name == "up_proj.g_idx")        {}
-                    else if (weight_name == "up_proj.qzeros")       {}
-                    else if (weight_name == "down_proj.qweight")    layer->down_proj_qweight_T  = transpose(data,opt);
-                    else if (weight_name == "down_proj.scales")     layer->down_proj_scales_T   = transpose(data,opt);
-                    else if (weight_name == "down_proj.bias")       {}
-                    else if (weight_name == "down_proj.g_idx")      {}
-                    else if (weight_name == "down_proj.qzeros")     {}
+                    ncnn::Mat data = load_weight(tensor,databuffer);
+                    if      (weight_name == "gate_proj.qweight")    layer->gate_proj_qweight_T  = data;
+                    else if (weight_name == "gate_proj.scales")     layer->gate_proj_scales_T   = data;
+                    else if (weight_name == "up_proj.qweight")      layer->up_proj_qweight_T    = data;
+                    else if (weight_name == "up_proj.scales")       layer->up_proj_scales_T     = data;
+                    else if (weight_name == "down_proj.qweight")    layer->down_proj_qweight_T  = data;
+                    else if (weight_name == "down_proj.scales")     layer->down_proj_scales_T   = data;
                     else { cout << "erro key: "; show_tensor_info(key,tensor); }
                 }
+                else { cout << "unused key: "; show_tensor_info(key,tensor); }
 
                 bar.update();
             }
@@ -1928,9 +1909,9 @@ public:
 };
 
 int main(int argc, char **argv) {
-    std::string modelpath = "Qwen1.5-4B-Chat-GPTQ-Int4";
+    std::string modelpath = "Qwen1.5-1.8B-Chat-GPTQ-Int4-lite";
     string user_prompt = "Hello! How are you?";
-    user_prompt = "windows、linux和macos的异同点分别是什么？";
+    // user_prompt = "windows、linux和macos的异同点分别是什么？";
 
     if (argc > 1) {
         modelpath = argv[1];

@@ -16,65 +16,6 @@
 typedef unsigned short float16;
 #define FLOAT_INF std::numeric_limits<float>::infinity()
 
-ncnn::Mat transpose(const ncnn::Mat& in, const ncnn::Option& opt) {
-    const int H = in.h, W = in.w;
-    ncnn::Mat inT(H,W,in.elemsize,1,opt.workspace_allocator);
-    if (in.elemsize == 2u) {
-        const float16* p_in = (const float16*)in;
-        float16* p_inT = (float16*)inT;
-        #pragma omp parallel for num_threads(opt.num_threads)
-        for (int h = 0; h < H; h++) {
-            for (int w = 0; w < W; w++) {
-                p_inT[w*H+h] = p_in[h*W+w];
-            }
-        }
-    }
-    else {
-        const float* p_in = (const float*)in;
-        float* p_inT = (float*)inT;
-        #pragma omp parallel for num_threads(opt.num_threads)
-        for (int h = 0; h < H; h++) {
-            for (int w = 0; w < W; w++) {
-                p_inT[w*H+h] = p_in[h*W+w];
-            }
-        }
-    }
-    return inT;
-}
-
-std::tuple<ncnn::Mat,ncnn::Mat> quant_embed(const ncnn::Mat& weight_data, const ncnn::Option& opt) {
-    int hidden_size = weight_data.w;
-    int vocab_size = weight_data.h;
-
-    ncnn::Mat quant_weight(hidden_size, vocab_size, 1u, 1, opt.workspace_allocator);
-    int8_t* p_quant_weight = (int8_t*)quant_weight;
-    ncnn::Mat weight_scale(vocab_size, 4u, 1, opt.workspace_allocator);
-    {
-        const float16* p_in = (const float16*)weight_data;
-        float* p_scale = (float*)weight_scale;
-        #pragma omp parallel for num_threads(opt.num_threads)
-        for (int n = 0; n < vocab_size; n++) {
-            float _min = ncnn::float16_to_float32(p_in[n*hidden_size]);
-            float _max = ncnn::float16_to_float32(p_in[n*hidden_size]);
-            for (int k = 0; k < hidden_size; k++) {
-                _min = std::min(_min,ncnn::float16_to_float32(p_in[n*hidden_size+k]));
-                _max = std::max(_max,ncnn::float16_to_float32(p_in[n*hidden_size+k]));
-            }
-            p_scale[n] = std::max(abs(_min),abs(_max)) / 127.f;
-        }
-        #pragma omp parallel for num_threads(opt.num_threads)
-        for (int n = 0; n < vocab_size; n++) {
-            for (int k = 0; k < hidden_size; k++) {
-                p_quant_weight[n*hidden_size+k] = int8_t(ncnn::float16_to_float32(p_in[n*hidden_size+k]) / p_scale[n]);
-            }
-        }
-    }
-
-    // weight_data.release();
-
-    return {quant_weight,weight_scale};
-}
-
 void logits_processor_RepetitionPenaltyLogitsProcessor(std::vector<int>& input_ids, ncnn::Mat& scores, float penalty) {
     // 去重，避免重复处理
     std::unordered_set<int> unique_set(input_ids.begin(), input_ids.end());
@@ -204,31 +145,32 @@ std::string join(const std::vector<std::string>& strings, char delimiter) {
     return result;
 }
 
-ncnn::Mat load_weight(safetensors::tensor_t& tensor, const uint8_t* databuffer, bool force_fp32) {
-    size_t elemsize = 4u;
-    if (tensor.dtype == safetensors::kFLOAT16) {
-        elemsize = 2u;
+ncnn::Mat load_weight(safetensors::tensor_t& tensor, const uint8_t* databuffer) {
+    size_t elemsize;
+    switch (tensor.dtype) {
+        case safetensors::kBOOL: elemsize = 1u; break;
+        case safetensors::kUINT8: elemsize = 1u; break;
+        case safetensors::kINT8: elemsize = 1u; break;
+        case safetensors::kINT16: elemsize = 2u; break;
+        case safetensors::kUINT16: elemsize = 2u; break;
+        case safetensors::kFLOAT16: elemsize = 2u; break;
+        case safetensors::kBFLOAT16: elemsize = 2u; break;
+        case safetensors::kINT32: elemsize = 4u; break;
+        case safetensors::kUINT32: elemsize = 4u; break;
+        case safetensors::kFLOAT32: elemsize = 4u; break;
+        case safetensors::kFLOAT64: elemsize = 8u; break;
+        case safetensors::kINT64: elemsize = 8u; break;
+        case safetensors::kUINT64: elemsize = 8u; break;
+        default: elemsize = 4u; break;
     }
 
-    ncnn::Mat _data;
     if (tensor.shape.size() == 1) {
-        ncnn::Mat data(tensor.shape[0],(void*)(databuffer+tensor.data_offsets[0]),elemsize);
-        _data = data;
+        return ncnn::Mat(tensor.shape[0],(void*)(databuffer+tensor.data_offsets[0]),elemsize);
     }
-    else if (tensor.shape.size() == 2) {
-        ncnn::Mat data(tensor.shape[1],tensor.shape[0],(void*)(databuffer+tensor.data_offsets[0]),elemsize);
-        _data = data;
+    if (tensor.shape.size() == 2) {
+        return ncnn::Mat(tensor.shape[1],tensor.shape[0],(void*)(databuffer+tensor.data_offsets[0]),elemsize);
     }
-
-    ncnn::Mat data;
-    if (force_fp32 && (elemsize == 2u)) {
-        cast_float16_to_float32(_data,data);
-    }
-    else {
-        data = _data;
-    }
-
-    return data.clone();
+    return ncnn::Mat();
 }
 
 void show_tensor_info(std::string& name, safetensors::tensor_t& tensor) {
