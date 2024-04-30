@@ -1771,11 +1771,11 @@ public:
             ex.input(("layer"+to_string(i)+".k.blob").c_str(), fake_k_cache[i]);
             ex.input(("layer"+to_string(i)+".v.blob").c_str(), fake_v_cache[i]);
         }
+
         // get prob
         ncnn::Mat out;
         ex.extract(out_blob.c_str(), out);
-
-        // real kv cache
+        // get real kv cache
         for (int i = 0; i < num_layers; i++) {
             ex.extract(("layer"+to_string(i)+".k.out").c_str(), k_cache[i], 1);
             ex.extract(("layer"+to_string(i)+".v.out").c_str(), v_cache[i], 1);
@@ -1909,7 +1909,7 @@ public:
 };
 
 int main(int argc, char **argv) {
-    std::string modelpath = "Qwen1.5-1.8B-Chat-GPTQ-Int4-lite";
+    std::string modelpath = "Qwen1.5-0.5B-Chat-GPTQ-Int4-lite";
     string user_prompt = "Hello! How are you?";
     // user_prompt = "windows、linux和macos的异同点分别是什么？";
 
@@ -1929,10 +1929,8 @@ int main(int argc, char **argv) {
 
     std::vector<int> input_ids = tokenizer.encode_template(user_prompt);
     
-    printf("CurrRSS: %dM & PeakRSS: %dM\n", int(getCurrentRSS() / 1024.0 / 1024.0), int(getPeakRSS() / 1024.0 / 1024.0));
-    
     model.generate(input_ids,tokenizer,false);
-    printf("CurrRSS: %dM & PeakRSS: %dM\n", int(getCurrentRSS() / 1024.0 / 1024.0), int(getPeakRSS() / 1024.0 / 1024.0));
+    // printf("CurrRSS: %dM & PeakRSS: %dM\n", getCurrentRSS()>>20, getPeakRSS()>>20);
 
     model.clear();
 
