@@ -18,15 +18,7 @@ endif()
 # 这是ncnn
 find_package(ncnn REQUIRED)
 
-# # 设置ArmPL
-# set(ArmPL_LIBRARY_DIR "/opt/arm/armpl_24.04_flang-new_clang_18/lib")
-# set(ArmPL_INCLUDE_DIR "/opt/arm/armpl_24.04_flang-new_clang_18/include")
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${ArmPL_INCLUDE_DIR}")
-# set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L${ArmPL_LIBRARY_DIR}")
-
-
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(chat chat.cpp)
-# target_link_libraries(chat ncnn armpl_lp64)
 target_link_libraries(chat ncnn)

@@ -161,7 +161,7 @@ public:
                     int32x4_t _qk = vdupq_n_s32(0);
                     int32x4_t _qv = vdupq_n_s32(0);
                     for (int k = 0; k+15 < group_size; k+=16) {
-                        register int w0, w1;
+                        register int32_t w0, w1;
                         register int8_t ww[16];
 
                         int8x16_t _d = vld1q_s8(p_quant_hidden_states);
@@ -359,15 +359,15 @@ public:
             __fp16* p_top_blob = top_blob;
             #pragma omp parallel for num_threads(opt.num_threads)
             for (int n = 0; n < hidden_size; n++) {
-                const int8_t* p_quant_qkv = (int8_t*)quant_qkv;
-                const float* p_quant_qkv_scale = (float*)quant_qkv_scale;
+                const int8_t* p_quant_qkv = (const int8_t*)quant_qkv;
+                const float* p_quant_qkv_scale = (const float*)quant_qkv_scale;
                 const __fp16* p_o_proj_scales_T = (const __fp16*)o_proj_scales_T + n * group;
-                const uint32_t* p_o_proj_qweight_T = (const uint32_t*)o_proj_qweight_T + n * part_size;
+                const int32_t* p_o_proj_qweight_T = (const int32_t*)o_proj_qweight_T + n * part_size;
                 float _tmp = 0.f;
                 for (int g = 0; g < group; g++) {
                     int32x4_t _qtmp = vdupq_n_s32(0);
                     for (int k = 0; k+15 < group_size; k+=16) {
-                        register int w0, w1;
+                        register int32_t w0, w1;
                         register int8_t ww[16];
                         w0 = *p_o_proj_qweight_T++;
                         w1 = *p_o_proj_qweight_T++;
@@ -453,7 +453,7 @@ public:
                         int32x4_t _qk = vdupq_n_s32(0);
                         int32x4_t _qv = vdupq_n_s32(0);
                         for (int k = 0; k+15 < group_size; k+=16) {
-                            register int w0, w1;
+                            register int32_t w0, w1;
                             register int8_t ww[16];
 
                             int8x16_t _d = vld1q_s8(p_quant_hidden_states);
@@ -739,12 +739,12 @@ public:
                     const int8_t* p_quant_qkv = (int8_t*)quant_qkv + m * hidden_size;
                     const float* p_quant_qkv_scale = (float*)quant_qkv_scale + m * group;
                     const __fp16* p_o_proj_scales_T = (const __fp16*)o_proj_scales_T + n * group;
-                    const uint32_t* p_o_proj_qweight_T = (const uint32_t*)o_proj_qweight_T + n * part_size;
+                    const int32_t* p_o_proj_qweight_T = (const int32_t*)o_proj_qweight_T + n * part_size;
                     float _tmp = 0.f;
                     for (int g = 0; g < group; g++) {
                         int32x4_t _qtmp = vdupq_n_s32(0);
                         for (int k = 0; k+15 < group_size; k+=16) {
-                            register int w0, w1;
+                            register int32_t w0, w1;
                             register int8_t ww[16];
                             w0 = *p_o_proj_qweight_T++;
                             w1 = *p_o_proj_qweight_T++;
@@ -835,7 +835,6 @@ public:
         Mat quant_middle(intermediate_size,1u,1,opt.workspace_allocator);
         Mat quant_middle_scale(group1,4u,1,opt.workspace_allocator);
 
-        __fp16* p_middle = middle;
         for (int m = 0; m < M; m++) {
             __fp16* p_bottom_top_blob = (__fp16*)bottom_top_blob + m * hidden_size;
             int8_t* p_quant_bottom_top_blob = (int8_t*)quant_bottom_top_blob;
@@ -852,11 +851,12 @@ public:
                 p_quant_bottom_top_blob_scale[i] = max / 127.f;
             }
 
+            __fp16* p_middle = middle;
             #pragma omp parallel for num_threads(opt.num_threads)
             for (int n = 0; n < N0; n++) {
-                const uint32_t* p_gate_proj_qweight_T = (const uint32_t*)gate_proj_qweight_T + n * (K0/8);
+                const int32_t* p_gate_proj_qweight_T = (const int32_t*)gate_proj_qweight_T + n * (K0/8);
                 const __fp16* p_gate_proj_scales_T = (const __fp16*)gate_proj_scales_T + n * group0;
-                const uint32_t* p_up_proj_qweight_T = (const uint32_t*)up_proj_qweight_T + n * (K0/8);
+                const int32_t* p_up_proj_qweight_T = (const int32_t*)up_proj_qweight_T + n * (K0/8);
                 const __fp16* p_up_proj_scales_T = (const __fp16*)up_proj_scales_T + n * group0;
                 const int8_t* p_quant_bottom_top_blob = (const int8_t*)quant_bottom_top_blob;
                 const float* p_quant_bottom_top_blob_scale = (const float*)quant_bottom_top_blob_scale;
@@ -865,7 +865,7 @@ public:
                     int32x4_t _qgate = vdupq_n_s32(0);
                     int32x4_t _qup = vdupq_n_s32(0);
                     for (int k = 0; k+15 < group_size; k+=16) {
-                        register int w0, w1;
+                        register int32_t w0, w1;
                         register int8_t ww[16];
 
                         int8x16_t _d = vld1q_s8(p_quant_bottom_top_blob);
@@ -919,7 +919,7 @@ public:
                 p_middle[n] = __fp16(silu(gate_proj) * up_proj);
             }
 
-            __fp16* p_middle = (__fp16*)middle;
+            p_middle = (__fp16*)middle;
             int8_t* p_quant_middle = (int8_t*)quant_middle;
             float* p_quant_middle_scale = (float*)quant_middle_scale;
             #pragma omp parallel for num_threads(opt.num_threads)
@@ -940,12 +940,12 @@ public:
                 const int8_t* p_quant_middle = (int8_t*)quant_middle;
                 const float* p_quant_middle_scale = (float*)quant_middle_scale;
                 const __fp16* p_down_proj_scales_T = (const __fp16*)down_proj_scales_T + n * group1;
-                const uint32_t* p_down_proj_qweight_T = (const uint32_t*)down_proj_qweight_T + n * (K1/8);
+                const int32_t* p_down_proj_qweight_T = (const int32_t*)down_proj_qweight_T + n * (K1/8);
                 float _tmp = 0.f;
                 for (int g = 0; g < group1; g++) {
                     int32x4_t _qtmp = vdupq_n_s32(0);
                     for (int k = 0; k+15 < group_size; k+=16) {
-                        register int w0, w1;
+                        register int32_t w0, w1;
                         register int8_t ww[16];
                         w0 = *p_down_proj_qweight_T++;
                         w1 = *p_down_proj_qweight_T++;
@@ -1884,7 +1884,7 @@ int main(int argc, char **argv) {
     std::vector<int> input_ids = tokenizer.encode_template(user_prompt);
     
     model.generate(input_ids,tokenizer,false);
-    printf("CurrRSS: %dM & PeakRSS: %dM\n", getCurrentRSS()>>20, getPeakRSS()>>20);
+    printf("CurrRSS: %zuM & PeakRSS: %zuM\n", getCurrentRSS()>>20, getPeakRSS()>>20);
 
     model.clear();
 
