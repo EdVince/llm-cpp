@@ -1608,7 +1608,7 @@ public:
         }
 
         // 获取模型
-        auto [blobs,layers] = get_model(config, "qwen.param");
+        auto [blobs,layers] = get_model(config, "");
 
         // 转换模型
         net = new ncnn::Net();
@@ -1752,39 +1752,8 @@ public:
         }
         
     }
-    ncnn::Mat prefill_forward(vector<int>& ids) {
+    ncnn::Mat forward(vector<int> ids) {
         ncnn::Mat input_ids = ncnn::Mat(2*ids.size(),(void*)ids.data(),2u);
-
-        // fake kv cache
-        vector<ncnn::Mat> fake_k_cache(num_layers);
-        vector<ncnn::Mat> fake_v_cache(num_layers);
-        for (int i = 0; i < num_layers; i++) {
-            fake_k_cache[i].create(0, 2u, 1, opt.workspace_allocator);
-            fake_v_cache[i].create(0, 2u, 1, opt.workspace_allocator);
-        }
-
-        // set input
-        ncnn::Extractor ex = net->create_extractor();
-        ex.set_light_mode(true);
-        ex.input("input_ids", input_ids);
-        for (int i = 0; i < num_layers; i++) {
-            ex.input(("layer"+to_string(i)+".k.blob").c_str(), fake_k_cache[i]);
-            ex.input(("layer"+to_string(i)+".v.blob").c_str(), fake_v_cache[i]);
-        }
-
-        // get prob
-        ncnn::Mat out;
-        ex.extract(out_blob.c_str(), out);
-        // get real kv cache
-        for (int i = 0; i < num_layers; i++) {
-            ex.extract(("layer"+to_string(i)+".k.out").c_str(), k_cache[i], 1);
-            ex.extract(("layer"+to_string(i)+".v.out").c_str(), v_cache[i], 1);
-        }
-
-        return out;
-    }
-    ncnn::Mat decode_forward(int id) {
-        ncnn::Mat input_ids = ncnn::Mat(2,(void*)&id,2u);
 
         // set input
         ncnn::Extractor ex = net->create_extractor();
@@ -1794,9 +1763,11 @@ public:
             ex.input(("layer"+to_string(i)+".k.blob").c_str(), k_cache[i]);
             ex.input(("layer"+to_string(i)+".v.blob").c_str(), v_cache[i]);
         }
-        // get output
+
+        // get prob
         ncnn::Mat out;
         ex.extract(out_blob.c_str(), out);
+        // get real kv cache
         for (int i = 0; i < num_layers; i++) {
             ex.extract(("layer"+to_string(i)+".k.out").c_str(), k_cache[i], 1);
             ex.extract(("layer"+to_string(i)+".v.out").c_str(), v_cache[i], 1);
@@ -1811,16 +1782,32 @@ public:
         // init kv cache
         k_cache.resize(num_layers);
         v_cache.resize(num_layers);
+        for (int i = 0; i < num_layers; i++) {
+            k_cache[i].create(0, 2u, 1, opt.workspace_allocator);
+            v_cache[i].create(0, 2u, 1, opt.workspace_allocator);
+        }
 
         // prepare
-        int next_tokens;
+        int next_tokens = -1;
         bool finish = false;
 
-        auto start_time = std::chrono::high_resolution_clock::now();
+        int prefill_speed = 0;
+        int decode_speed = 0;
 
-        // prefill
-        {
-            ncnn::Mat next_token_logits = prefill_forward(input_ids);
+        while (!finish) {
+            ncnn::Mat next_token_logits;
+            if (next_tokens == -1) {
+                auto start_time = std::chrono::high_resolution_clock::now();
+                next_token_logits = forward(input_ids); // prefill
+                auto end_time = std::chrono::high_resolution_clock::now();
+                prefill_speed = std::chrono::duration_cast<std::chrono::microseconds>(end_time-start_time).count();
+            }
+            else {
+                auto start_time = std::chrono::high_resolution_clock::now();
+                next_token_logits = forward({next_tokens}); // decode
+                auto end_time = std::chrono::high_resolution_clock::now();
+                decode_speed += std::chrono::duration_cast<std::chrono::microseconds>(end_time-start_time).count();
+            }
 
             if (random) {
                 logits_processor_RepetitionPenaltyLogitsProcessor(input_ids,next_token_logits,float(generation_config["repetition_penalty"]));
@@ -1844,44 +1831,12 @@ public:
         
             cout << tokenizer.decode_skip(next_tokens) << std::flush;
         }
-        
-        auto prefill_time = std::chrono::high_resolution_clock::now();
-
-        // decode
-        while(!finish)
-        {
-            ncnn::Mat next_token_logits = decode_forward(next_tokens);
-
-            if (random) {
-                logits_processor_RepetitionPenaltyLogitsProcessor(input_ids,next_token_logits,float(generation_config["repetition_penalty"]));
-                logits_warper_TopKLogitsWarper(next_token_logits,50,-FLOAT_INF);
-                logits_warper_TopPLogitsWarper(next_token_logits,float(generation_config["top_p"]),-FLOAT_INF,1);
-                softmax(next_token_logits);
-                next_tokens = multinomial(next_token_logits);
-            }
-            else {
-                next_tokens = argmax(next_token_logits);
-            }
-
-            input_ids.push_back(next_tokens);
-
-            for (auto eos : eos_token_id) {
-                if (next_tokens == eos) {
-                    finish = true;
-                }
-            }
-            finish = finish || stopping_criteria_MaxLengthCriteria(input_ids,int(config["max_position_embeddings"]),int(config["max_position_embeddings"]));
-        
-            cout << tokenizer.decode_skip(next_tokens) << std::flush;
-        }
-
         cout << endl;
 
-        auto decode_time = std::chrono::high_resolution_clock::now();
-        auto prefill_duration = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_time - start_time).count() / input_len;
-        auto decode_duration = std::chrono::duration_cast<std::chrono::milliseconds>(decode_time - prefill_time).count() / (input_ids.size()-input_len);
-        std::cout << "prefill: " << 1000.0 / prefill_duration << " token/s" << std::endl;
-        std::cout << "decode: " << 1000.0 / decode_duration << " token/s" << std::endl;
+        prefill_speed = prefill_speed / input_len;
+        decode_speed = decode_speed  / (input_ids.size()-input_len);
+        std::cout << "prefill: " << 1000000.0 / prefill_speed << " token/s" << std::endl;
+        std::cout << "decode: " << 1000000.0 / decode_speed << " token/s" << std::endl;
 
     }
     void clear() {
@@ -1909,9 +1864,8 @@ public:
 };
 
 int main(int argc, char **argv) {
-    std::string modelpath = "Qwen1.5-0.5B-Chat-GPTQ-Int4-lite";
+    std::string modelpath = "Qwen1.5-4B-Chat-GPTQ-Int4-lite";
     string user_prompt = "Hello! How are you?";
-    // user_prompt = "windows、linux和macos的异同点分别是什么？";
 
     if (argc > 1) {
         modelpath = argv[1];
@@ -1930,7 +1884,7 @@ int main(int argc, char **argv) {
     std::vector<int> input_ids = tokenizer.encode_template(user_prompt);
     
     model.generate(input_ids,tokenizer,false);
-    // printf("CurrRSS: %dM & PeakRSS: %dM\n", getCurrentRSS()>>20, getPeakRSS()>>20);
+    printf("CurrRSS: %dM & PeakRSS: %dM\n", getCurrentRSS()>>20, getPeakRSS()>>20);
 
     model.clear();
 

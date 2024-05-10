@@ -17,7 +17,9 @@ if __name__ == '__main__':
     SRC = args.input_model
     DST = SRC + '-lite'
     if os.path.exists(DST):
+        print('removing the old version...')
         shutil.rmtree(DST)
+    print('copying...')
     shutil.copytree(SRC,DST)
 
     total_cnt = 0
@@ -26,15 +28,16 @@ if __name__ == '__main__':
     quant_cnt = 0
     save_cnt = 0
 
+    print('converting...')
     sts = sorted(glob(os.path.join(SRC,'*.safetensors')))
-    for st in tqdm(sts):
+    for st in sts:
         st = os.path.basename(st)
 
         tensors = {}
         with safe_open(os.path.join(SRC,st), framework="pt", device="cpu") as f:
             total_cnt += len(f.keys())
 
-            for key in f.keys():
+            for key in tqdm(f.keys()):
 
                 if 'g_idx' in key or 'qzeros' in key or 'o_proj.bias' in key or 'gate_proj.bias' in key or 'up_proj.bias' in key or 'down_proj.bias' in key:
                     remove_cnt += 1
@@ -49,8 +52,6 @@ if __name__ == '__main__':
                     tensor = f.get_tensor(key).float()
                     scale = (torch.max(torch.abs(tensor),dim=1,keepdim=True)[0] / 127.0).to(dtype=torch.float32)
                     quant = torch.trunc(tensor / scale).to(dtype=torch.int8)
-                    diff = torch.abs(quant*scale-tensor)
-                    print('quant {}: diff: min:{:.6f}, mean:{:.6f}, max:{:.6f}'.format(quant_cnt,diff.min(),diff.mean(),diff.max()))
                     tensors[key+'.scale'] = scale.squeeze()
                     tensors[key+'.quant'] = quant
                     quant_cnt += 1
