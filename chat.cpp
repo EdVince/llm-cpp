@@ -1,18 +1,3 @@
-#include <iostream>
-#include <vector>
-#include <string>
-#include <filesystem>
-#include <functional>
-#include <limits>
-#include <fstream>
-#include <chrono>
-#include <unordered_set>
-#include <float.h>
-#include <queue>
-#include <random>
-#include <algorithm>
-#include <regex>
-#include <filesystem>
 // safetensors
 #define SAFETENSORS_CPP_IMPLEMENTATION
 #include "safetensors.hh"
@@ -22,19 +7,13 @@
 // ncnn
 #include <net.h>
 #include <layer.h>
-// progressbar
-#include "progressbar.hpp"
 // utils
 #include "utils.h"
 #include "tokenizer.h"
 #include "getmem.h"
-
+// arm
 #include <arm_neon.h>
 
-// #include "armpl.h"
-#include <stdio.h>
-
-using namespace std;
 using namespace ncnn;
 
 class Qwen2RotaryEmbedding {
@@ -1225,13 +1204,13 @@ public:
     ncnn::Layer* cur_layer;
 
 public:
-    ncnn::Blob* forward(ncnn::Blob* inp, vector<ncnn::Blob*>& net_blobs, vector<ncnn::Layer*>& net_layers) {
+    ncnn::Blob* forward(ncnn::Blob* inp, std::vector<ncnn::Blob*>& net_blobs, std::vector<ncnn::Layer*>& net_layers) {
         int cur_layer_idx = net_layers.size();
 
         inp->consumer = cur_layer_idx;
 
         ncnn::Blob* out = new ncnn::Blob();
-        out->name = "blob" + to_string(net_blobs.size());
+        out->name = "blob" + std::to_string(net_blobs.size());
         out->producer = cur_layer_idx;
 
         net_blobs.push_back(out);
@@ -1251,7 +1230,7 @@ public:
     ncnn::Layer* cur_layer;
     int layer_idx;
 public:
-    Qwen2Attention(string name, nlohmann::json& config, int layer_idx) : layer_idx(layer_idx) {
+    Qwen2Attention(std::string name, nlohmann::json& config, int layer_idx) : layer_idx(layer_idx) {
         cur_layer = new Qwen2AttentionLayer();
         cur_layer->name = name;
         cur_layer->type = "Qwen2Attention";
@@ -1267,28 +1246,28 @@ public:
         pd.set(4, int(config["quantization_config"]["bits"]));// bits
         cur_layer->load_param(pd);
     }
-    ncnn::Blob* forward(ncnn::Blob* inp, vector<ncnn::Blob*>& net_blobs, vector<ncnn::Layer*>& net_layers) {
+    ncnn::Blob* forward(ncnn::Blob* inp, std::vector<ncnn::Blob*>& net_blobs, std::vector<ncnn::Layer*>& net_layers) {
         int cur_layer_idx = net_layers.size();
         net_layers.push_back(cur_layer);
         // 输入、k、v绑定
         inp->consumer = cur_layer_idx;
-        ncnn::Blob* ink = net_blobs[find_blob_idx_by_name("layer"+to_string(layer_idx)+".k.blob",net_blobs)];
+        ncnn::Blob* ink = net_blobs[find_blob_idx_by_name("layer"+std::to_string(layer_idx)+".k.blob",net_blobs)];
         ink->consumer = cur_layer_idx;
-        ncnn::Blob* inv = net_blobs[find_blob_idx_by_name("layer"+to_string(layer_idx)+".v.blob",net_blobs)];
+        ncnn::Blob* inv = net_blobs[find_blob_idx_by_name("layer"+std::to_string(layer_idx)+".v.blob",net_blobs)];
         inv->consumer = cur_layer_idx;
         // 输出blob绑定
         ncnn::Blob* out = new ncnn::Blob();
-        out->name = "blob" + to_string(net_blobs.size());
+        out->name = "blob" + std::to_string(net_blobs.size());
         out->producer = cur_layer_idx;
         net_blobs.push_back(out);
         // 输出k绑定
         ncnn::Blob* ouk = new ncnn::Blob();
-        ouk->name = "layer"+to_string(layer_idx)+".k.out";
+        ouk->name = "layer"+std::to_string(layer_idx)+".k.out";
         ouk->producer = cur_layer_idx;
         net_blobs.push_back(ouk);
         // 输出v绑定
         ncnn::Blob* ouv = new ncnn::Blob();
-        ouv->name = "layer"+to_string(layer_idx)+".v.out";
+        ouv->name = "layer"+std::to_string(layer_idx)+".v.out";
         ouv->producer = cur_layer_idx;
         net_blobs.push_back(ouv);
         // 绑定blob到layer
@@ -1306,7 +1285,7 @@ public:
 
 class Qwen2MLP : public Basic1T1 {
 public:
-    Qwen2MLP(string name, nlohmann::json& config) {
+    Qwen2MLP(std::string name, nlohmann::json& config) {
         cur_layer = new Qwen2MLPLayer();
         cur_layer->name = name;
         cur_layer->type = "Qwen2MLP";
@@ -1322,7 +1301,7 @@ public:
 
 class Qwen2RMSNorm : public Basic1T1 {
 public:
-    Qwen2RMSNorm(string name, int hidden_size, float eps) {
+    Qwen2RMSNorm(std::string name, int hidden_size, float eps) {
         cur_layer = new Qwen2RMSNormLayer();
         cur_layer->name = name;
         cur_layer->type = "Qwen2RMSNorm";
@@ -1339,24 +1318,24 @@ public:
     ncnn::Layer* cur_layer;
 
 public:
-    Split(string name) {
+    Split(std::string name) {
         cur_layer = ncnn::create_layer("Split");
         cur_layer->name = name;
         cur_layer->type = "Split";
     }
 
-    tuple<ncnn::Blob*,ncnn::Blob*> forward_1_to_2(ncnn::Blob* inp, vector<ncnn::Blob*>& net_blobs, vector<ncnn::Layer*>& net_layers) {
+    std::tuple<ncnn::Blob*,ncnn::Blob*> forward_1_to_2(ncnn::Blob* inp, std::vector<ncnn::Blob*>& net_blobs, std::vector<ncnn::Layer*>& net_layers) {
         int cur_layer_idx = net_layers.size();
 
         inp->consumer = cur_layer_idx;
 
         ncnn::Blob* out0 = new ncnn::Blob();
-        out0->name = "blob" + to_string(net_blobs.size());
+        out0->name = "blob" + std::to_string(net_blobs.size());
         out0->producer = cur_layer_idx;
         net_blobs.push_back(out0);
 
         ncnn::Blob* out1 = new ncnn::Blob();
-        out1->name = "blob" + to_string(net_blobs.size());
+        out1->name = "blob" + std::to_string(net_blobs.size());
         out1->producer = cur_layer_idx;
         net_blobs.push_back(out1);
 
@@ -1377,20 +1356,20 @@ public:
     ncnn::Layer* cur_layer;
 
 public:
-    Add(string name) {
+    Add(std::string name) {
         cur_layer = new AddLayer();
         cur_layer->name = name;
         cur_layer->type = "Add";
     }
 
-    ncnn::Blob* forward_2_to_1(ncnn::Blob* inp0, ncnn::Blob* inp1, vector<ncnn::Blob*>& net_blobs, vector<ncnn::Layer*>& net_layers) {
+    ncnn::Blob* forward_2_to_1(ncnn::Blob* inp0, ncnn::Blob* inp1, std::vector<ncnn::Blob*>& net_blobs, std::vector<ncnn::Layer*>& net_layers) {
         int cur_layer_idx = net_layers.size();
 
         inp0->consumer = cur_layer_idx;
         inp1->consumer = cur_layer_idx;
 
         ncnn::Blob* out = new ncnn::Blob();
-        out->name = "blob" + to_string(net_blobs.size());
+        out->name = "blob" + std::to_string(net_blobs.size());
         out->producer = cur_layer_idx;
         net_blobs.push_back(out);
 
@@ -1418,7 +1397,7 @@ public:
     Add* add1;
 
 public:
-    Qwen2DecoderLayer(string name, nlohmann::json& config, int layer_idx) {
+    Qwen2DecoderLayer(std::string name, nlohmann::json& config, int layer_idx) {
         name += ".";
         
         self_attn = new Qwen2Attention(name + "self_attn", config, layer_idx);
@@ -1433,7 +1412,7 @@ public:
         add1 = new Add(name + "residual.add.1");
     }
 
-    ncnn::Blob* forward(ncnn::Blob* blob, vector<ncnn::Blob*>& net_blobs, vector<ncnn::Layer*>& net_layers) {
+    ncnn::Blob* forward(ncnn::Blob* blob, std::vector<ncnn::Blob*>& net_blobs, std::vector<ncnn::Layer*>& net_layers) {
 
         auto [blob0,blob1] = split0->forward_1_to_2(blob,net_blobs,net_layers);
         blob0 = input_layernorm->forward(blob0,net_blobs,net_layers);
@@ -1451,7 +1430,7 @@ public:
 
 class Embedding : public Basic1T1 {
 public:
-    Embedding(string name, int vocab_size, int hidden_size) {
+    Embedding(std::string name, int vocab_size, int hidden_size) {
         cur_layer = new EmbeddingLayer();
         cur_layer->name = name;
         cur_layer->type = "Embedding";
@@ -1466,19 +1445,19 @@ public:
 class Qwen2Model {
 public:
     Embedding* embed_tokens;
-    vector<Qwen2DecoderLayer*> layers;
+    std::vector<Qwen2DecoderLayer*> layers;
     Qwen2RMSNorm* norm;
 
 public:
-    Qwen2Model(string name, nlohmann::json& config) {
+    Qwen2Model(std::string name, nlohmann::json& config) {
         name += ".";
         embed_tokens = new Embedding(name + "embed_tokens", config["vocab_size"], config["hidden_size"]);
         for (int i = 0; i < config["num_hidden_layers"]; i++)
-            layers.push_back(new Qwen2DecoderLayer(name + "layers." + to_string(i), config, i));
+            layers.push_back(new Qwen2DecoderLayer(name + "layers." + std::to_string(i), config, i));
         norm = new Qwen2RMSNorm(name + "norm", config["hidden_size"], config["rms_norm_eps"]);
     }
 
-    ncnn::Blob* forward(ncnn::Blob* blob, vector<ncnn::Blob*>& net_blobs, vector<ncnn::Layer*>& net_layers) {
+    ncnn::Blob* forward(ncnn::Blob* blob, std::vector<ncnn::Blob*>& net_blobs, std::vector<ncnn::Layer*>& net_layers) {
         blob = embed_tokens->forward(blob,net_blobs,net_layers);
         for (Qwen2DecoderLayer* layer : layers) {
             blob = layer->forward(blob,net_blobs,net_layers);
@@ -1490,7 +1469,7 @@ public:
 
 class Linear : public Basic1T1 {
 public:
-    Linear(string name, nlohmann::json& config) {
+    Linear(std::string name, nlohmann::json& config) {
         cur_layer = new LMHeadLayer();
         cur_layer->name = name;
         cur_layer->type = "LMHead";
@@ -1512,19 +1491,19 @@ public:
         lm_head = new Linear("lm_head",config);
     }
 
-    ncnn::Blob* forward(ncnn::Blob* blob, vector<ncnn::Blob*>& net_blobs, vector<ncnn::Layer*>& net_layers) {
+    ncnn::Blob* forward(ncnn::Blob* blob, std::vector<ncnn::Blob*>& net_blobs, std::vector<ncnn::Layer*>& net_layers) {
         blob = model->forward(blob,net_blobs,net_layers);
         blob = lm_head->forward(blob,net_blobs,net_layers);
         return blob;
     }
 };
 
-tuple<vector<ncnn::Blob>,vector<ncnn::Layer*>> get_model(nlohmann::json& config, string save_path) {
+std::tuple<std::vector<ncnn::Blob>,std::vector<ncnn::Layer*>> get_model(nlohmann::json& config, std::string save_path) {
     // 创建模型
     Qwen2ForCausalLM* model = new Qwen2ForCausalLM(config);
     // 记录blob和layer
-    vector<ncnn::Blob*> p_blobs;
-    vector<ncnn::Layer*> layers;
+    std::vector<ncnn::Blob*> p_blobs;
+    std::vector<ncnn::Layer*> layers;
     // 准备输入节点
     {
         // blob
@@ -1545,12 +1524,12 @@ tuple<vector<ncnn::Blob>,vector<ncnn::Layer*>> get_model(nlohmann::json& config,
         {
             // blob
             ncnn::Blob* blob = new ncnn::Blob();
-            blob->name = "layer"+to_string(i)+".k.blob";
+            blob->name = "layer"+std::to_string(i)+".k.blob";
             blob->producer = i+1;
             p_blobs.push_back(blob);
             // layer
             ncnn::Layer* input = ncnn::create_layer("Input");
-            input->name = "layer"+to_string(i)+".k";
+            input->name = "layer"+std::to_string(i)+".k";
             input->type = "Input";
             input->tops = {i+1};
             layers.push_back(input);
@@ -1560,12 +1539,12 @@ tuple<vector<ncnn::Blob>,vector<ncnn::Layer*>> get_model(nlohmann::json& config,
         {
             // blob
             ncnn::Blob* blob = new ncnn::Blob();
-            blob->name = "layer"+to_string(i)+".v.blob";
+            blob->name = "layer"+std::to_string(i)+".v.blob";
             blob->producer = i+1+num_layers;
             p_blobs.push_back(blob);
             // layer
             ncnn::Layer* input = ncnn::create_layer("Input");
-            input->name = "layer"+to_string(i)+".v";
+            input->name = "layer"+std::to_string(i)+".v";
             input->type = "Input";
             input->tops = {i+1+num_layers};
             layers.push_back(input);
@@ -1579,7 +1558,7 @@ tuple<vector<ncnn::Blob>,vector<ncnn::Layer*>> get_model(nlohmann::json& config,
         save(save_path,p_blobs,layers);
     }
     // 转换blob格式
-    vector<ncnn::Blob> blobs(p_blobs.size());
+    std::vector<ncnn::Blob> blobs(p_blobs.size());
     for (int i = 0; i < p_blobs.size(); i++) {
         blobs[i].name = p_blobs[i]->name;
         blobs[i].producer = p_blobs[i]->producer;
@@ -1591,7 +1570,7 @@ tuple<vector<ncnn::Blob>,vector<ncnn::Layer*>> get_model(nlohmann::json& config,
 
 class Model {
 public:
-    Model(string modelpath) {
+    Model(std::string modelpath) {
         opt.lightmode = true;
         opt.num_threads = 4;
         opt.use_bf16_storage = false;
@@ -1624,7 +1603,7 @@ public:
             d_layers[i] = layers[i];
         }
 
-        out_blob = "blob" + to_string(d_blobs.size()-1);
+        out_blob = "blob" + std::to_string(d_blobs.size()-1);
 
         // 辅助层
         {
@@ -1660,12 +1639,6 @@ public:
             if (sts[num_st].mmaped) databuffer = sts[num_st].databuffer_addr;
             else databuffer = sts[num_st].storage.data();
 
-            // 进度条
-            progressbar bar(sts[num_st].tensors.size());
-            bar.set_todo_char(" ");
-            bar.set_done_char("█");
-            bar.set_opening_bracket_char("Loading "+safetensor_files[num_st]+"  [");
-
             // 逐权重处理
             for (size_t i = 0; i < sts[num_st].tensors.size(); i++) {
                 std::string key = sts[num_st].tensors.keys()[i];
@@ -1679,7 +1652,7 @@ public:
                         EmbeddingLayer* layer = (EmbeddingLayer*)get_layer("model.embed_tokens",layers);
                         if (key.find("quant") != std::string::npos) layer->quant_weight = data;
                         else if (key.find("scale") != std::string::npos) layer->weight_scale = data;
-                        else { cout << "erro key: "; show_tensor_info(key,tensor); }
+                        else { std::cout << "erro key: "; show_tensor_info(key,tensor); }
                     }
                     {
                         LMHeadLayer* layer = (LMHeadLayer*)get_layer("lm_head",layers);
@@ -1692,19 +1665,19 @@ public:
                     LMHeadLayer* layer = (LMHeadLayer*)get_layer("lm_head",layers);
                     if (key.find("quant") != std::string::npos) layer->quant_weight = data;
                     else if (key.find("scale") != std::string::npos) layer->weight_scale = data;
-                    else { cout << "erro key: "; show_tensor_info(key,tensor); }
+                    else { std::cout << "erro key: "; show_tensor_info(key,tensor); }
                 }
                 else if ((key.find("layernorm.weight") != std::string::npos) || (key.find("model.norm") != std::string::npos)) {
-                    vector<string> token = split(key,'.');
-                    string layer_name = join(vector<string>(token.begin(),token.end()-1),'.');
+                    std::vector<std::string> token = split(key,'.');
+                    std::string layer_name = join(std::vector<std::string>(token.begin(),token.end()-1),'.');
                     Qwen2RMSNormLayer* layer = (Qwen2RMSNormLayer*)get_layer(layer_name,layers);
                     ncnn::Mat data = load_weight(tensor,databuffer);
                     layer->weight_data = data;
                 }
                 else if ((key.find("model.layers.") != std::string::npos) && (key.find(".self_attn") != std::string::npos)) {
-                    vector<string> token = split(key,'.');
-                    string weight_name = join(vector<string>(token.end()-2,token.end()),'.');
-                    string layer_name = join(vector<string>(token.begin(),token.end()-2),'.');
+                    std::vector<std::string> token = split(key,'.');
+                    std::string weight_name = join(std::vector<std::string>(token.end()-2,token.end()),'.');
+                    std::string layer_name = join(std::vector<std::string>(token.begin(),token.end()-2),'.');
                     Qwen2AttentionLayer* layer = (Qwen2AttentionLayer*)get_layer(layer_name,layers);
                     ncnn::Mat data = load_weight(tensor,databuffer);
                     if      (weight_name == "q_proj.qweight")   layer->q_proj_qweight_T = data;
@@ -1718,16 +1691,16 @@ public:
                     else if (weight_name == "v_proj.bias")      layer->v_proj_bias      = data;
                     else if (weight_name == "o_proj.qweight")   layer->o_proj_qweight_T = data;
                     else if (weight_name == "o_proj.scales")    layer->o_proj_scales_T = data;
-                    else { cout << "erro key: "; show_tensor_info(key,tensor); }
+                    else { std::cout << "erro key: "; show_tensor_info(key,tensor); }
                     if (layer->rotary_emb_cos_cached.empty() || layer->rotary_emb_sin_cached.empty()) {
                         layer->rotary_emb_cos_cached = rotary_emb_cos_cached;
                         layer->rotary_emb_sin_cached = rotary_emb_sin_cached;
                     }
                 }
                 else if ((key.find("model.layers.") != std::string::npos) && (key.find(".mlp") != std::string::npos)) {
-                    vector<string> token = split(key,'.');
-                    string weight_name = join(vector<string>(token.end()-2,token.end()),'.');
-                    string layer_name = join(vector<string>(token.begin(),token.end()-2),'.');
+                    std::vector<std::string> token = split(key,'.');
+                    std::string weight_name = join(std::vector<std::string>(token.end()-2,token.end()),'.');
+                    std::string layer_name = join(std::vector<std::string>(token.begin(),token.end()-2),'.');
                     Qwen2MLPLayer* layer = (Qwen2MLPLayer*)get_layer(layer_name,layers);
                     ncnn::Mat data = load_weight(tensor,databuffer);
                     if      (weight_name == "gate_proj.qweight")    layer->gate_proj_qweight_T  = data;
@@ -1736,13 +1709,10 @@ public:
                     else if (weight_name == "up_proj.scales")       layer->up_proj_scales_T     = data;
                     else if (weight_name == "down_proj.qweight")    layer->down_proj_qweight_T  = data;
                     else if (weight_name == "down_proj.scales")     layer->down_proj_scales_T   = data;
-                    else { cout << "erro key: "; show_tensor_info(key,tensor); }
+                    else { std::cout << "erro key: "; show_tensor_info(key,tensor); }
                 }
-                else { cout << "unused key: "; show_tensor_info(key,tensor); }
-
-                bar.update();
+                else { std::cout << "unused key: "; show_tensor_info(key,tensor); }
             }
-            cout << endl;
         }
 
         // 加载生成配置
@@ -1752,7 +1722,7 @@ public:
         }
         
     }
-    ncnn::Mat forward(vector<int> ids) {
+    ncnn::Mat forward(std::vector<int> ids) {
         ncnn::Mat input_ids = ncnn::Mat(2*ids.size(),(void*)ids.data(),2u);
 
         // set input
@@ -1760,8 +1730,8 @@ public:
         ex.set_light_mode(true);
         ex.input("input_ids", input_ids);
         for (int i = 0; i < num_layers; i++) {
-            ex.input(("layer"+to_string(i)+".k.blob").c_str(), k_cache[i]);
-            ex.input(("layer"+to_string(i)+".v.blob").c_str(), v_cache[i]);
+            ex.input(("layer"+std::to_string(i)+".k.blob").c_str(), k_cache[i]);
+            ex.input(("layer"+std::to_string(i)+".v.blob").c_str(), v_cache[i]);
         }
 
         // get prob
@@ -1769,13 +1739,13 @@ public:
         ex.extract(out_blob.c_str(), out);
         // get real kv cache
         for (int i = 0; i < num_layers; i++) {
-            ex.extract(("layer"+to_string(i)+".k.out").c_str(), k_cache[i], 1);
-            ex.extract(("layer"+to_string(i)+".v.out").c_str(), v_cache[i], 1);
+            ex.extract(("layer"+std::to_string(i)+".k.out").c_str(), k_cache[i], 1);
+            ex.extract(("layer"+std::to_string(i)+".v.out").c_str(), v_cache[i], 1);
         }
 
         return out;
     }
-    void generate(vector<int>& input_ids, GPT2Tokenizer& tokenizer, bool random) {
+    std::string generate(std::vector<int>& input_ids, GPT2Tokenizer& tokenizer, bool random, bool stream, bool profile) {
         int input_len = input_ids.size();
         auto eos_token_id = generation_config["eos_token_id"];
 
@@ -1793,6 +1763,8 @@ public:
 
         int prefill_speed = 0;
         int decode_speed = 0;
+
+        std::string output = "";
 
         while (!finish) {
             ncnn::Mat next_token_logits;
@@ -1829,15 +1801,23 @@ public:
             }
             finish = finish || stopping_criteria_MaxLengthCriteria(input_ids,int(config["max_position_embeddings"]),int(config["max_position_embeddings"]));
         
-            cout << tokenizer.decode_skip(next_tokens) << std::flush;
+            output += tokenizer.decode_skip(next_tokens);
+            if (stream) {
+                std::cout << tokenizer.decode_skip(next_tokens) << std::flush;
+            }
         }
-        cout << endl;
+        if (stream) {
+            std::cout << std::endl;
+        }
 
         prefill_speed = prefill_speed / input_len;
         decode_speed = decode_speed  / (input_ids.size()-input_len);
-        std::cout << "prefill: " << 1000000.0 / prefill_speed << " token/s" << std::endl;
-        std::cout << "decode: " << 1000000.0 / decode_speed << " token/s" << std::endl;
+        if (profile) {
+            std::cout << "prefill: " << 1000000.0 / prefill_speed << " token/s" << std::endl;
+            std::cout << "decode: " << 1000000.0 / decode_speed << " token/s" << std::endl;
+        }
 
+        return output;
     }
     void clear() {
         net->mutable_blobs().clear();
@@ -1848,24 +1828,24 @@ public:
     nlohmann::json generation_config;
     nlohmann::json config;
 
-    vector<safetensors::safetensors_t> sts;
+    std::vector<safetensors::safetensors_t> sts;
 
     int num_layers;
-    string out_blob;
+    std::string out_blob;
 
     ncnn::Mat rotary_emb_cos_cached;
     ncnn::Mat rotary_emb_sin_cached;
 
-    vector<ncnn::Mat> k_cache;
-    vector<ncnn::Mat> v_cache;
+    std::vector<ncnn::Mat> k_cache;
+    std::vector<ncnn::Mat> v_cache;
 
     ncnn::Option opt;
     ncnn::Net* net;
 };
 
 int main(int argc, char **argv) {
-    std::string modelpath = "Qwen1.5-4B-Chat-GPTQ-Int4-lite";
-    string user_prompt = "Hello! How are you?";
+    std::string modelpath = "Qwen1.5-1.8B-Chat-GPTQ-Int4-lite";
+    std::string user_prompt = "Hello! How are you?";
 
     if (argc > 1) {
         modelpath = argv[1];
@@ -1878,12 +1858,12 @@ int main(int argc, char **argv) {
 
     Model model(modelpath);
 
-    vector<string> chat_template = {"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n","<|im_end|>\n<|im_start|>assistant\n"};
+    std::vector<std::string> chat_template = {"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n","<|im_end|>\n<|im_start|>assistant\n"};
     user_prompt = chat_template[0] + user_prompt + chat_template[1];
 
     std::vector<int> input_ids = tokenizer.encode_template(user_prompt);
     
-    model.generate(input_ids,tokenizer,false);
+    std::string output = model.generate(input_ids,tokenizer,false,true,true);
     printf("CurrRSS: %zuM & PeakRSS: %zuM\n", getCurrentRSS()>>20, getPeakRSS()>>20);
 
     model.clear();
