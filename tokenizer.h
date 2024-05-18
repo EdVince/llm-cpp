@@ -53,7 +53,7 @@ public:
 	const std::vector<std::string> special_tokens = {"<|im_start|>", "<|im_end|>"};
 	const std::vector<std::string> special_tokens_regex = {"\\<\\|im_start\\|\\>", "\\<\\|im_end\\|\\>"};
 
-	static std::optional<GPT2Tokenizer> load(std::string_view vocab_file, std::string_view merges_file) {
+	static GPT2Tokenizer load(std::string_view vocab_file, std::string_view merges_file) {
 		// load merges file
 		std::ifstream merges_file_stream;
 		// assuming null-terminated string
@@ -61,7 +61,7 @@ public:
 
 		if (!merges_file_stream.good()) {
 			std::cerr << "Error: could not open merges file " << merges_file << std::endl;
-			return std::nullopt;
+			throw std::runtime_error("error");
 		}
 
 		BPERanks bpe_ranks;
@@ -76,21 +76,43 @@ public:
 			bpe_ranks.emplace(std::move(p), it.i);
 		}
 
+		// simdjson::dom::parser parser;
+		// simdjson::dom::object object;
+		// // assuming null-terminated string
+		// simdjson::dom::element doc = parser.load(vocab_file.data());
+
+		// auto error = doc.get(object);
+		// if (error) {
+		// 	std::cerr << "Error: " << error << std::endl;
+		// 	throw std::runtime_error("error");
+		// }
+
 		simdjson::dom::parser parser;
 		simdjson::dom::object object;
-		// assuming null-terminated string
-		simdjson::dom::element doc = parser.load(vocab_file.data());
+		simdjson::dom::element doc;
+		
+		auto error0 = parser.load(vocab_file.data()).get(doc);
+		auto error1 = parser.load(vocab_file.data()).get(object);
 
-		auto error = doc.get(object);
-		if (error) {
-			std::cerr << "Error: " << error << std::endl;
-			return std::nullopt;
+		if (error0) {
+			std::cerr << "Error: " << error0 << std::endl;
+			throw std::runtime_error("error");
+		}
+		if (error1) {
+			std::cerr << "Error: " << error1 << std::endl;
+			throw std::runtime_error("error");
 		}
 
 		Encoder encoder;
 		Decoder decoder;
 
-		for (const auto &[key, value] : object) {
+		// for (const auto &[key, value] : object) {
+		// 	encoder.emplace(key, value);
+		// 	decoder.emplace(value, key);
+		// }
+		for (const simdjson::dom::key_value_pair& key_value : object) {
+			std::string key = std::string(key_value.key);
+			int64_t value = key_value.value;
 			encoder.emplace(key, value);
 			decoder.emplace(value, key);
 		}
@@ -245,7 +267,7 @@ private:
 
 		while (true) {
 			const auto bigram = std::min_element(ranks.begin(), ranks.end(),
-					[this](const auto &lhs, const auto &rhs) -> bool {
+					[this](const BPERanks::const_iterator& lhs, const BPERanks::const_iterator& rhs) -> bool {
 						if (lhs == m_bpe_ranks.end() && lhs == m_bpe_ranks.end()) {
 							return false;
 						} else if (lhs == m_bpe_ranks.end() || rhs == m_bpe_ranks.end()) {
@@ -258,7 +280,10 @@ private:
 				// could not find any matches in ranks
 				break;
 			}
-			const auto [first, second] = (*bigram)->first;
+			// const auto [first, second] = (*bigram)->first;
+			const std::pair<std::string, std::string> first_second = (*bigram)->first;
+			const std::string first = first_second.first;
+			const std::string second = first_second.second;
 			std::vector<std::string> new_word;
 
 			size_t i = 0;

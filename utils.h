@@ -1,10 +1,11 @@
 #include <string>
 #include <vector>
-#include <float.h>
 #include <queue>
 #include <random>
 #include <algorithm>
 #include <unordered_set>
+#include <dirent.h>
+#include <float.h>
 
 #define SAFETENSORS_CPP_IMPLEMENTATION
 #include "safetensors.hh"
@@ -14,6 +15,23 @@
 
 typedef unsigned short float16;
 #define FLOAT_INF std::numeric_limits<float>::infinity()
+
+std::vector<std::string> getFilesInDirectory(const std::string& directoryPath) {
+    std::vector<std::string> files;
+    DIR* dir = opendir(directoryPath.c_str());
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (entry->d_type == DT_REG) { // 只添加普通文件
+                files.push_back(entry->d_name);
+            }
+        }
+        closedir(dir);
+    } else {
+        std::cerr << "无法打开目录: " << directoryPath << std::endl;
+    }
+    return files;
+}
 
 void logits_processor_RepetitionPenaltyLogitsProcessor(std::vector<int>& input_ids, ncnn::Mat& scores, float penalty) {
     // 去重，避免重复处理

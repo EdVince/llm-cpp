@@ -1414,12 +1414,18 @@ public:
 
     ncnn::Blob* forward(ncnn::Blob* blob, std::vector<ncnn::Blob*>& net_blobs, std::vector<ncnn::Layer*>& net_layers) {
 
-        auto [blob0,blob1] = split0->forward_1_to_2(blob,net_blobs,net_layers);
+        std::tuple<ncnn::Blob*,ncnn::Blob*> blob0_blob1 = split0->forward_1_to_2(blob,net_blobs,net_layers);
+        ncnn::Blob* blob0 = std::get<0>(blob0_blob1);
+        ncnn::Blob* blob1 = std::get<1>(blob0_blob1);
+
         blob0 = input_layernorm->forward(blob0,net_blobs,net_layers);
         blob0 = self_attn->forward(blob0,net_blobs,net_layers);
         blob = add0->forward_2_to_1(blob0,blob1,net_blobs,net_layers);
 
-        auto [blob2,blob3] = split1->forward_1_to_2(blob,net_blobs,net_layers);
+        std::tuple<ncnn::Blob*,ncnn::Blob*> blob2_blob3 = split1->forward_1_to_2(blob,net_blobs,net_layers);
+        ncnn::Blob* blob2 = std::get<0>(blob2_blob3);
+        ncnn::Blob* blob3 = std::get<1>(blob2_blob3);
+
         blob2 = post_attention_layernorm->forward(blob2,net_blobs,net_layers);
         blob2 = mlp->forward(blob2,net_blobs,net_layers);
         blob = add1->forward_2_to_1(blob2,blob3,net_blobs,net_layers);
@@ -1587,7 +1593,9 @@ public:
         }
 
         // 获取模型
-        auto [blobs,layers] = get_model(config, "");
+        std::tuple<std::vector<ncnn::Blob>,std::vector<ncnn::Layer*>> blobs_layers = get_model(config, "");
+        std::vector<ncnn::Blob> blobs = std::get<0>(blobs_layers);
+        std::vector<ncnn::Layer*> layers = std::get<1>(blobs_layers);
 
         // 转换模型
         net = new ncnn::Net();
@@ -1618,18 +1626,15 @@ public:
 
         // 查找权重文件
         std::vector<std::string> safetensor_files;
-        for (const auto& entry : std::filesystem::directory_iterator(modelpath)) {
-            if (entry.is_regular_file()) {
-                std::string filename = entry.path().filename().string();
-                if ((filename.find("model") != std::string::npos) &&
-                    (filename.find(".safetensors") != std::string::npos) &&
-                    (filename.find(".json") == std::string::npos)) {
-                    safetensor_files.push_back(filename);
-                }
+        for (std::string& filename : getFilesInDirectory(modelpath)) {
+            if ((filename.find("model") != std::string::npos) &&
+                (filename.find(".safetensors") != std::string::npos) &&
+                (filename.find(".json") == std::string::npos)) {
+                safetensor_files.push_back(filename);
             }
         }
         sts.resize(safetensor_files.size());
-        
+
         for (int num_st = 0; num_st < safetensor_files.size(); num_st++) {
 
             // 读取权重
@@ -1844,7 +1849,7 @@ public:
 };
 
 int main(int argc, char **argv) {
-    std::string modelpath = "Qwen1.5-1.8B-Chat-GPTQ-Int4-lite";
+    std::string modelpath = "Qwen1.5-0.5B-Chat-GPTQ-Int4-lite";
     std::string user_prompt = "Hello! How are you?";
 
     if (argc > 1) {
@@ -1854,7 +1859,7 @@ int main(int argc, char **argv) {
         user_prompt = argv[2];
     }
 
-    GPT2Tokenizer tokenizer = *GPT2Tokenizer::load(modelpath+"/vocab.json", modelpath+"/merges.txt");
+    GPT2Tokenizer tokenizer = GPT2Tokenizer::load(modelpath+"/vocab.json", modelpath+"/merges.txt");
 
     Model model(modelpath);
 
