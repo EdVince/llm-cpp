@@ -1,3 +1,5 @@
+#include <random>
+
 #define SAFETENSORS_CPP_IMPLEMENTATION
 #include "safetensors.hh"
 
@@ -381,7 +383,7 @@ class Model {
 public:
     Model(std::string modelpath) {
         opt.lightmode = true;
-        opt.num_threads = 4;
+        opt.num_threads = 1;
         opt.use_bf16_storage = false;
         opt.use_fp16_packed = false;
         opt.use_fp16_storage = true;
@@ -553,7 +555,7 @@ public:
 
         return out;
     }
-    std::string generate(std::vector<int>& input_ids, GPT2Tokenizer& tokenizer, bool random, bool stream, bool profile) {
+    std::string generate(std::vector<int>& input_ids, GPT2Tokenizer& tokenizer, const int max_new_token, bool random, bool stream, bool profile) {
         int input_len = input_ids.size();
         auto eos_token_id = generation_config["eos_token_id"];
 
@@ -603,6 +605,10 @@ public:
 
             input_ids.push_back(next_tokens);
 
+            if (input_ids.size() - input_len == max_new_token) {
+                finish = true;
+            }
+
             for (auto eos : eos_token_id) {
                 if (next_tokens == eos) {
                     finish = true;
@@ -627,6 +633,18 @@ public:
         }
 
         return output;
+    }
+    void benchmark(GPT2Tokenizer& tokenizer, const int prefill_token) {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(10, 10000);
+
+        std::vector<int> random_prefill_token;
+        for (int i = 0; i < prefill_token; i++) {
+            random_prefill_token.push_back(dis(gen));
+        }
+
+        auto output = generate(random_prefill_token, tokenizer, 1, false, false, true);
     }
     void clear() {
         net->mutable_blobs().clear();

@@ -2,7 +2,7 @@
 #include "getmem.h"
 
 int main(int argc, char **argv) {
-    std::string modelpath = "Qwen1.5-0.5B-Chat-GPTQ-Int4-lite";
+    std::string modelpath = "Qwen1.5-1.8B-Chat-GPTQ-Int4-lite";
     std::string user_prompt = "Hello! How are you?";
 
     if (argc > 1) {
@@ -21,8 +21,10 @@ int main(int argc, char **argv) {
 
     std::vector<int> input_ids = tokenizer.encode_template(user_prompt);
     
-    std::string output = model.generate(input_ids,tokenizer,false,true,true);
+    std::string output = model.generate(input_ids,tokenizer,1024,false,true,true);
     printf("CurrRSS: %zuM & PeakRSS: %zuM\n", getCurrentRSS()>>20, getPeakRSS()>>20);
+
+    // model.benchmark(tokenizer,128);
 
     model.clear();
 
