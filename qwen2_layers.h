@@ -381,7 +381,7 @@ public:
 
             Mat quant_hidden_states(hidden_size * seq_len,1u,1,opt.workspace_allocator);
             Mat quant_hidden_states_scale(group * seq_len,4u,1,opt.workspace_allocator);
-            
+
             group_quant(group_size, seq_len, hidden_size, (int8_t*)quant_hidden_states, (float*)quant_hidden_states_scale, (const __fp16*)hidden_states, opt);
 
             ncnn::Mat query_states(hidden_size * seq_len, 2u, 1, opt.workspace_allocator);
@@ -686,153 +686,96 @@ public:
         int M = seq_len;
         int K0 = hidden_size, N0 = intermediate_size;
         int K1 = intermediate_size, N1 = hidden_size;
-
         int group0 = K0/group_size, group1 = K1/group_size;
+
         Mat quant_bottom_top_blob(hidden_size,1u,1,opt.workspace_allocator);
         Mat quant_bottom_top_blob_scale(group0,4u,1,opt.workspace_allocator);
-        Mat quant_middle(intermediate_size,1u,1,opt.workspace_allocator);
-        Mat quant_middle_scale(group1,4u,1,opt.workspace_allocator);
 
-        for (int m = 0; m < M; m++) {
-            __fp16* p_bottom_top_blob = (__fp16*)bottom_top_blob + m * hidden_size;
-            int8_t* p_quant_bottom_top_blob = (int8_t*)quant_bottom_top_blob;
-            float* p_quant_bottom_top_blob_scale = (float*)quant_bottom_top_blob_scale;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int i = 0; i < group0; i++) {
-                float max = float(p_bottom_top_blob[i*group_size]);
-                for (int j = 0; j < group_size; j++) {
-                    max = std::max(max,abs(float(p_bottom_top_blob[i*group_size+j])));
-                }
-                for (int j = 0; j < group_size; j++) {
-                    p_quant_bottom_top_blob[i*group_size+j] = int8_t(127.f * float(p_bottom_top_blob[i*group_size+j]) / max);
-                }
-                p_quant_bottom_top_blob_scale[i] = max / 127.f;
+        __fp16* p_bottom_top_blob = (__fp16*)bottom_top_blob;
+        int8_t* p_quant_bottom_top_blob = (int8_t*)quant_bottom_top_blob;
+        float* p_quant_bottom_top_blob_scale = (float*)quant_bottom_top_blob_scale;
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int i = 0; i < group0; i++) {
+            float max = float(p_bottom_top_blob[i*group_size]);
+            for (int j = 0; j < group_size; j++) {
+                max = std::max(max,abs(float(p_bottom_top_blob[i*group_size+j])));
             }
-
-            __fp16* p_middle = middle;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int n = 0; n < N0; n++) {
-                const int32_t* p_gate_proj_qweight_T = (const int32_t*)gate_proj_qweight_T + n * (K0/8);
-                const __fp16* p_gate_proj_scales_T = (const __fp16*)gate_proj_scales_T + n * group0;
-                const int32_t* p_up_proj_qweight_T = (const int32_t*)up_proj_qweight_T + n * (K0/8);
-                const __fp16* p_up_proj_scales_T = (const __fp16*)up_proj_scales_T + n * group0;
-                const int8_t* p_quant_bottom_top_blob = (const int8_t*)quant_bottom_top_blob;
-                const float* p_quant_bottom_top_blob_scale = (const float*)quant_bottom_top_blob_scale;
-                float gate_proj = 0.f, up_proj = 0.f;
-                for (int g = 0; g < group0; g++) {
-                    int32x4_t _qgate = vdupq_n_s32(0);
-                    int32x4_t _qup = vdupq_n_s32(0);
-                    for (int k = 0; k+15 < group_size; k+=16) {
-                        register int32_t w0, w1;
-                        register int8_t ww[16];
-
-                        int8x16_t _d = vld1q_s8(p_quant_bottom_top_blob);
-
-                        w0 = *p_gate_proj_qweight_T++;
-                        w1 = *p_gate_proj_qweight_T++;
-                        ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
-                        ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
-                        ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
-                        ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
-                        ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
-                        ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
-                        ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
-                        ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
-                        ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
-                        ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
-                        ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
-                        ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
-                        ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
-                        ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
-                        ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
-                        ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
-                        _qgate = vdotq_s32(_qgate,vld1q_s8(ww),_d);
-
-                        w0 = *p_up_proj_qweight_T++;
-                        w1 = *p_up_proj_qweight_T++;
-                        ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
-                        ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
-                        ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
-                        ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
-                        ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
-                        ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
-                        ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
-                        ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
-                        ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
-                        ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
-                        ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
-                        ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
-                        ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
-                        ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
-                        ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
-                        ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
-                        _qup = vdotq_s32(_qup,vld1q_s8(ww),_d);
-
-                        p_quant_bottom_top_blob+=16;
-                    }
-                    gate_proj += vaddvq_s32(_qgate) * float(*p_gate_proj_scales_T++) * *p_quant_bottom_top_blob_scale;
-                    up_proj += vaddvq_s32(_qup) * float(*p_up_proj_scales_T++) * *p_quant_bottom_top_blob_scale;
-                    p_quant_bottom_top_blob_scale++;
-                }
-                p_middle[n] = __fp16(silu(gate_proj) * up_proj);
+            for (int j = 0; j < group_size; j++) {
+                p_quant_bottom_top_blob[i*group_size+j] = int8_t(127.f * float(p_bottom_top_blob[i*group_size+j]) / max);
             }
-
-            p_middle = (__fp16*)middle;
-            int8_t* p_quant_middle = (int8_t*)quant_middle;
-            float* p_quant_middle_scale = (float*)quant_middle_scale;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int i = 0; i < group1; i++) {
-                float max = float(p_middle[i*group_size]);
-                for (int j = 0; j < group_size; j++) {
-                    max = std::max(max,abs(float(p_middle[i*group_size+j])));
-                }
-                for (int j = 0; j < group_size; j++) {
-                    p_quant_middle[i*group_size+j] = int8_t(127.f * float(p_middle[i*group_size+j]) / max);
-                }
-                p_quant_middle_scale[i] = max / 127.f;
-            }
-
-            p_bottom_top_blob = (__fp16*)bottom_top_blob + m*N1;
-            #pragma omp parallel for num_threads(opt.num_threads)
-            for (int n = 0; n < N1; n++) {
-                const int8_t* p_quant_middle = (int8_t*)quant_middle;
-                const float* p_quant_middle_scale = (float*)quant_middle_scale;
-                const __fp16* p_down_proj_scales_T = (const __fp16*)down_proj_scales_T + n * group1;
-                const int32_t* p_down_proj_qweight_T = (const int32_t*)down_proj_qweight_T + n * (K1/8);
-                float _tmp = 0.f;
-                for (int g = 0; g < group1; g++) {
-                    int32x4_t _qtmp = vdupq_n_s32(0);
-                    for (int k = 0; k+15 < group_size; k+=16) {
-                        register int32_t w0, w1;
-                        register int8_t ww[16];
-                        w0 = *p_down_proj_qweight_T++;
-                        w1 = *p_down_proj_qweight_T++;
-                        ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
-                        ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
-                        ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
-                        ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
-                        ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
-                        ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
-                        ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
-                        ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
-                        ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
-                        ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
-                        ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
-                        ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
-                        ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
-                        ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
-                        ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
-                        ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
-                        int8x16_t _w = vld1q_s8(ww);
-                        int8x16_t _d = vld1q_s8(p_quant_middle);
-                        _qtmp = vdotq_s32(_qtmp,_w,_d);
-                        p_quant_middle+=16;
-                    }
-                    _tmp += vaddvq_s32(_qtmp) * float(*p_down_proj_scales_T++) * *p_quant_middle_scale++;
-                }
-                p_bottom_top_blob[n] = __fp16(_tmp);
-            }
+            p_quant_bottom_top_blob_scale[i] = max / 127.f;
         }
+
+        __fp16* p_middle = middle;
+        #pragma omp parallel for num_threads(opt.num_threads)
+        for (int n = 0; n < N0; n++) {
+            const int32_t* p_gate_proj_qweight_T = (const int32_t*)gate_proj_qweight_T + n * (K0/8);
+            const __fp16* p_gate_proj_scales_T = (const __fp16*)gate_proj_scales_T + n * group0;
+            const int32_t* p_up_proj_qweight_T = (const int32_t*)up_proj_qweight_T + n * (K0/8);
+            const __fp16* p_up_proj_scales_T = (const __fp16*)up_proj_scales_T + n * group0;
+            const int8_t* p_quant_bottom_top_blob = (const int8_t*)quant_bottom_top_blob;
+            const float* p_quant_bottom_top_blob_scale = (const float*)quant_bottom_top_blob_scale;
+            float gate_proj = 0.f, up_proj = 0.f;
+            for (int g = 0; g < group0; g++) {
+                int32x4_t _qgate = vdupq_n_s32(0);
+                int32x4_t _qup = vdupq_n_s32(0);
+                for (int k = 0; k+15 < group_size; k+=16) {
+                    register int32_t w0, w1;
+                    register int8_t ww[16];
+
+                    int8x16_t _d = vld1q_s8(p_quant_bottom_top_blob);
+
+                    w0 = *p_gate_proj_qweight_T++;
+                    w1 = *p_gate_proj_qweight_T++;
+                    ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
+                    ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
+                    ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
+                    ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
+                    ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
+                    ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
+                    ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
+                    ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
+                    ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
+                    ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
+                    ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
+                    ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
+                    ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
+                    ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
+                    ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
+                    ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
+                    _qgate = vdotq_s32(_qgate,vld1q_s8(ww),_d);
+
+                    w0 = *p_up_proj_qweight_T++;
+                    w1 = *p_up_proj_qweight_T++;
+                    ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
+                    ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
+                    ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
+                    ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
+                    ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
+                    ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
+                    ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
+                    ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
+                    ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
+                    ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
+                    ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
+                    ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
+                    ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
+                    ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
+                    ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
+                    ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
+                    _qup = vdotq_s32(_qup,vld1q_s8(ww),_d);
+
+                    p_quant_bottom_top_blob+=16;
+                }
+                gate_proj += vaddvq_s32(_qgate) * float(*p_gate_proj_scales_T++) * *p_quant_bottom_top_blob_scale;
+                up_proj += vaddvq_s32(_qup) * float(*p_up_proj_scales_T++) * *p_quant_bottom_top_blob_scale;
+                p_quant_bottom_top_blob_scale++;
+            }
+            p_middle[n] = __fp16(silu(gate_proj) * up_proj);
+        }
+
+        quant_and_gemv_s4_group(hidden_size, intermediate_size, _mask, _zeros, 
+                bottom_top_blob, middle, down_proj_qweight_T, down_proj_scales_T, opt);
 
         return 0;
 

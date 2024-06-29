@@ -183,3 +183,92 @@ inline void gemm_s8_perchannel(const int M, const int N, const int K,
         p_C[n] = vaddvq_s32(_tmp) * As * p_Bs[n];
     }
 }
+
+inline void group_quant(const int group_size, const int K, 
+        int8_t* quant, float* scales, const __fp16* input, const ncnn::Option& opt) {
+
+    const int groups = K / group_size;
+
+    const __fp16* p_input = (const __fp16*)input;
+    int8_t* p_quant = (int8_t*)quant;
+    float* p_scales = (float*)scales;
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (int i = 0; i < groups; i++) {
+        float max = float(p_input[i * group_size]);
+        for (int j = 0; j < group_size; j++) {
+            max = std::max(max, abs(float(p_input[i * group_size + j])));
+        }
+        max = 127.f / max;
+        for (int j = 0; j < group_size; j++) {
+            p_quant[i * group_size + j] = int8_t(max * float(p_input[i * group_size + j]));
+        }
+        p_scales[i] = 1.f / max;
+    }
+}
+
+inline void gemv_s4_group(const int N, const int K, const int8x16_t _mask, const int8x16_t _zeros, 
+        ncnn::Mat& C, 
+        const ncnn::Mat& Aq, const ncnn::Mat& As, 
+        const ncnn::Mat& Bqt, const ncnn::Mat& Bst, 
+        const ncnn::Mat& bias, const bool with_bias, 
+        const ncnn::Option& opt) {
+
+    const int kc = 128;
+    const int nc = 1;
+    const int Ks = K / kc;
+    const int Ns = N / nc;
+
+    if (with_bias) {
+        const __fp16* p_b = (const __fp16*)bias;
+        __fp16* p_C = (__fp16*)C;
+        memcpy(p_C, p_b, sizeof(__fp16) * N);
+    }
+    else {
+        __fp16* p_C = (__fp16*)C;
+        for (int ni = 0; ni < N; ni++) {
+            *p_C++ = __fp16(0.f);
+        }
+    }
+
+    const float* p_As = (const float*)As;
+    __fp16* p_C = (__fp16*)C;
+
+    #pragma omp parallel for num_threads(opt.num_threads)
+    for (int ni = 0; ni < N; ni += nc) {
+
+        const int32_t* p_Bqt = (const int32_t*)Bqt + ni * (K / 8);
+
+        for (int ki = 0; ki < K; ki += kc) {
+
+            const int8_t* p_Aq = (const int8_t*)Aq + ki;
+
+            int32x4_t _sum = vdupq_n_s32(0);
+            #pragma unroll
+            for (int kki = 0; kki < kc; kki += 16) {
+                int8x16_t _d = vld1q_s8(p_Aq);
+                _sum = vdotq_s32(_sum, get_int4x16_weight(p_Bqt, _mask, _zeros), _d);
+                p_Aq += 16;
+                p_Bqt += 2;
+            }
+
+            const float _Bs = float(((const __fp16*)Bst)[ni * Ks + ki / kc]);
+            const float _As = p_As[ki / kc];
+
+            p_C[ni] += __fp16(vaddvq_s32(_sum) * _As * _Bs);
+        }
+    }
+}
+
+inline void quant_and_gemv_s4_group(const int N, const int K, const int8x16_t _mask, const int8x16_t _zeros, 
+        ncnn::Mat& C, const ncnn::Mat& A, const ncnn::Mat& Bqt, const ncnn::Mat& Bst, const ncnn::Option& opt) {
+
+    const int kc = 128;
+    const int Ks = K / kc;
+
+    ncnn::Mat Aq(K, 1u, 1, opt.workspace_allocator);
+    ncnn::Mat As(Ks, 4u, 1, opt.workspace_allocator);
+
+    group_quant(kc, K, (int8_t*)Aq, (float*)As, (const __fp16*)A, opt);
+
+    gemv_s4_group(N, K, _mask, _zeros, C, Aq, As, Bqt, Bst, ncnn::Mat(), false, opt);
+}
