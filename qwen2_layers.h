@@ -638,12 +638,12 @@ public:
         return 0;
     }
     virtual int forward_inplace(Mat& bottom_top_blob, const Option& opt) const {
-        int seq_len = bottom_top_blob.h;
+        ncnn::Mat& hidden_states = bottom_top_blob;
+
+        const int seq_len = hidden_states.h;
+        const int groups = hidden_size / group_size;
 
         if (seq_len > 1) {
-            const int groups = hidden_size / group_size;
-
-            ncnn::Mat& hidden_states = bottom_top_blob;
             ncnn::Mat hidden_states_quant(hidden_size * seq_len, 1u, 1, opt.workspace_allocator);
             ncnn::Mat hidden_states_scales(groups * seq_len, 4u, 1, opt.workspace_allocator);
             ncnn::Mat gate(intermediate_size * seq_len, 2u, 1, opt.workspace_allocator);
@@ -676,106 +676,42 @@ public:
             }
 
             quant_and_gemm_s4_group(seq_len, hidden_size, intermediate_size, _mask, _zeros, 
-                bottom_top_blob, gate, down_proj_qweight_T, down_proj_scales_T, opt);
+                hidden_states, gate, down_proj_qweight_T, down_proj_scales_T, opt);
 
             return 0;
         }
 
-        Mat middle(intermediate_size, 2u, 1, opt.workspace_allocator);
+        Mat hidden_states_quant(hidden_size,1u,1,opt.workspace_allocator);
+        Mat hidden_states_scales(groups,4u,1,opt.workspace_allocator);
+        ncnn::Mat gate(intermediate_size, 2u, 1, opt.workspace_allocator);
+        ncnn::Mat up(intermediate_size, 2u, 1, opt.workspace_allocator);
+        ncnn::Mat& middle = gate;
 
-        int M = seq_len;
-        int K0 = hidden_size, N0 = intermediate_size;
-        int K1 = intermediate_size, N1 = hidden_size;
-        int group0 = K0/group_size, group1 = K1/group_size;
+        group_quant(group_size, hidden_size, (int8_t*)hidden_states_quant, (float*)hidden_states_scales, (const __fp16*)hidden_states, opt);
 
-        Mat quant_bottom_top_blob(hidden_size,1u,1,opt.workspace_allocator);
-        Mat quant_bottom_top_blob_scale(group0,4u,1,opt.workspace_allocator);
+        gemv_s4_group(intermediate_size, hidden_size, _mask, _zeros, 
+            gate, 
+            hidden_states_quant, hidden_states_scales, 
+            gate_proj_qweight_T, gate_proj_scales_T, 
+            ncnn::Mat(), false,
+            opt);
 
-        __fp16* p_bottom_top_blob = (__fp16*)bottom_top_blob;
-        int8_t* p_quant_bottom_top_blob = (int8_t*)quant_bottom_top_blob;
-        float* p_quant_bottom_top_blob_scale = (float*)quant_bottom_top_blob_scale;
-        #pragma omp parallel for num_threads(opt.num_threads)
-        for (int i = 0; i < group0; i++) {
-            float max = float(p_bottom_top_blob[i*group_size]);
-            for (int j = 0; j < group_size; j++) {
-                max = std::max(max,abs(float(p_bottom_top_blob[i*group_size+j])));
-            }
-            for (int j = 0; j < group_size; j++) {
-                p_quant_bottom_top_blob[i*group_size+j] = int8_t(127.f * float(p_bottom_top_blob[i*group_size+j]) / max);
-            }
-            p_quant_bottom_top_blob_scale[i] = max / 127.f;
-        }
+        gemv_s4_group(intermediate_size, hidden_size, _mask, _zeros, 
+            up, 
+            hidden_states_quant, hidden_states_scales, 
+            up_proj_qweight_T, up_proj_scales_T, 
+            ncnn::Mat(), false, 
+            opt);
 
-        __fp16* p_middle = middle;
-        #pragma omp parallel for num_threads(opt.num_threads)
-        for (int n = 0; n < N0; n++) {
-            const int32_t* p_gate_proj_qweight_T = (const int32_t*)gate_proj_qweight_T + n * (K0/8);
-            const __fp16* p_gate_proj_scales_T = (const __fp16*)gate_proj_scales_T + n * group0;
-            const int32_t* p_up_proj_qweight_T = (const int32_t*)up_proj_qweight_T + n * (K0/8);
-            const __fp16* p_up_proj_scales_T = (const __fp16*)up_proj_scales_T + n * group0;
-            const int8_t* p_quant_bottom_top_blob = (const int8_t*)quant_bottom_top_blob;
-            const float* p_quant_bottom_top_blob_scale = (const float*)quant_bottom_top_blob_scale;
-            float gate_proj = 0.f, up_proj = 0.f;
-            for (int g = 0; g < group0; g++) {
-                int32x4_t _qgate = vdupq_n_s32(0);
-                int32x4_t _qup = vdupq_n_s32(0);
-                for (int k = 0; k+15 < group_size; k+=16) {
-                    register int32_t w0, w1;
-                    register int8_t ww[16];
-
-                    int8x16_t _d = vld1q_s8(p_quant_bottom_top_blob);
-
-                    w0 = *p_gate_proj_qweight_T++;
-                    w1 = *p_gate_proj_qweight_T++;
-                    ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
-                    ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
-                    ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
-                    ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
-                    ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
-                    ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
-                    ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
-                    ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
-                    ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
-                    ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
-                    ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
-                    ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
-                    ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
-                    ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
-                    ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
-                    ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
-                    _qgate = vdotq_s32(_qgate,vld1q_s8(ww),_d);
-
-                    w0 = *p_up_proj_qweight_T++;
-                    w1 = *p_up_proj_qweight_T++;
-                    ww[ 0] = (int8_t)(((w0 >> 0) & mask) - zeros);
-                    ww[ 1] = (int8_t)(((w0 >> 4) & mask) - zeros);
-                    ww[ 2] = (int8_t)(((w0 >> 8) & mask) - zeros);
-                    ww[ 3] = (int8_t)(((w0 >> 12) & mask) - zeros);
-                    ww[ 4] = (int8_t)(((w0 >> 16) & mask) - zeros);
-                    ww[ 5] = (int8_t)(((w0 >> 20) & mask) - zeros);
-                    ww[ 6] = (int8_t)(((w0 >> 24) & mask) - zeros);
-                    ww[ 7] = (int8_t)(((w0 >> 28) & mask) - zeros);
-                    ww[ 8] = (int8_t)(((w1 >> 0) & mask) - zeros);
-                    ww[ 9] = (int8_t)(((w1 >> 4) & mask) - zeros);
-                    ww[10] = (int8_t)(((w1 >> 8) & mask) - zeros);
-                    ww[11] = (int8_t)(((w1 >> 12) & mask) - zeros);
-                    ww[12] = (int8_t)(((w1 >> 16) & mask) - zeros);
-                    ww[13] = (int8_t)(((w1 >> 20) & mask) - zeros);
-                    ww[14] = (int8_t)(((w1 >> 24) & mask) - zeros);
-                    ww[15] = (int8_t)(((w1 >> 28) & mask) - zeros);
-                    _qup = vdotq_s32(_qup,vld1q_s8(ww),_d);
-
-                    p_quant_bottom_top_blob+=16;
-                }
-                gate_proj += vaddvq_s32(_qgate) * float(*p_gate_proj_scales_T++) * *p_quant_bottom_top_blob_scale;
-                up_proj += vaddvq_s32(_qup) * float(*p_up_proj_scales_T++) * *p_quant_bottom_top_blob_scale;
-                p_quant_bottom_top_blob_scale++;
-            }
-            p_middle[n] = __fp16(silu(gate_proj) * up_proj);
+        const __fp16* p_gate = (const __fp16*)gate;
+        const __fp16* p_up = (const __fp16*)up;
+        __fp16* p_middle = (__fp16*)middle;
+        for (int k = 0; k < intermediate_size; k++) {
+            *p_middle++ = __fp16(silu_fp16(*p_gate++) * float(*p_up++));
         }
 
         quant_and_gemv_s4_group(hidden_size, intermediate_size, _mask, _zeros, 
-                bottom_top_blob, middle, down_proj_qweight_T, down_proj_scales_T, opt);
+            hidden_states, middle, down_proj_qweight_T, down_proj_scales_T, opt);
 
         return 0;
 
