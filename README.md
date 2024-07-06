@@ -1,21 +1,11 @@
 # llm-cpp
 
 ### Performance
-In M1:
+In M1, prefill 128 token and decode 128 token:
 | model                       | prefill(token/s) | decode(token/s) | RAM   |
 | --------------------------- | ---------------- | --------------- | ----- |
-| Qwen1.5-0.5B-Chat-GPTQ-Int4 |                  | 66              | 360M  |
-| Qwen1.5-1.8B-Chat-GPTQ-Int4 |                  | 21              | 1100M |
-| Qwen1.5-4B-Chat-GPTQ-Int4   |                  | 9               | 2100M |
-| Qwen1.5-7B-Chat-GPTQ-Int4   |                  | 2               | 3900M |
-
-In Snapdragon 865:
-| model                       | prefill(token/s) | decode(token/s) | RAM   |
-| --------------------------- | ---------------- | --------------- | ----- |
-| Qwen1.5-0.5B-Chat-GPTQ-Int4 |                  | 29              | 448M  |
-| Qwen1.5-1.8B-Chat-GPTQ-Int4 |                  | 7               | 1.4G  |
-| Qwen1.5-4B-Chat-GPTQ-Int4   |                  | 3.24            | 2.3G  |
-| Qwen1.5-7B-Chat-GPTQ-Int4   |                  | 1.21            | 4G    |
+| Qwen1.5-0.5B-Chat-GPTQ-Int4 | 365              | 60              | 360M  |
+| Qwen1.5-1.8B-Chat-GPTQ-Int4 | 101              | 18              | 1100M |
 
 ### Implement & Feature detail
  - 支持直接加载huggingface格式的模型

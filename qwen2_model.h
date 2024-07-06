@@ -383,7 +383,7 @@ class Model {
 public:
     Model(std::string modelpath) {
         opt.lightmode = true;
-        opt.num_threads = 1;
+        opt.num_threads = 4;
         opt.use_bf16_storage = false;
         opt.use_fp16_packed = false;
         opt.use_fp16_storage = true;
@@ -634,17 +634,17 @@ public:
 
         return output;
     }
-    void benchmark(GPT2Tokenizer& tokenizer, const int prefill_token) {
+    void benchmark(GPT2Tokenizer& tokenizer, const int token_num) {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> dis(10, 10000);
 
         std::vector<int> random_prefill_token;
-        for (int i = 0; i < prefill_token; i++) {
+        for (int i = 0; i < token_num; i++) {
             random_prefill_token.push_back(dis(gen));
         }
 
-        auto output = generate(random_prefill_token, tokenizer, 1, false, false, true);
+        auto output = generate(random_prefill_token, tokenizer, token_num, false, false, true);
     }
     void clear() {
         net->mutable_blobs().clear();

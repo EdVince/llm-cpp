@@ -87,39 +87,20 @@ inline void gemm_s4_group(const int M, const int N, const int K, const int8x16_t
         }
     }
 
-    ncnn::Mat cache(128 * 4 / 8, 4u, 1, opt.workspace_allocator);
-
     const float* p_As = (const float*)As;
+    const __fp16* p_Bst = (const __fp16*)Bst;
     __fp16* p_C = (__fp16*)C;
 
-    #pragma omp parallel for num_threads(opt.num_threads)
     for (int ki = 0; ki < K; ki += kc) {
+        #pragma omp parallel for num_threads(opt.num_threads)
         for (int ni = 0; ni < N; ni += nc) {
-
-            int32_t* p_cache = (int32_t*)cache;
-            const int32_t* p_Bqt_0 = (const int32_t*)Bqt + (ni + 0) * (K / 8) + (ki / 8);
-            const int32_t* p_Bqt_1 = (const int32_t*)Bqt + (ni + 1) * (K / 8) + (ki / 8);
-            const int32_t* p_Bqt_2 = (const int32_t*)Bqt + (ni + 2) * (K / 8) + (ki / 8);
-            const int32_t* p_Bqt_3 = (const int32_t*)Bqt + (ni + 3) * (K / 8) + (ki / 8);
-            #pragma unroll
-            for (int kki = 0; kki < kc; kki += 16) {
-                *p_cache++ = *p_Bqt_0++;
-                *p_cache++ = *p_Bqt_0++;
-                *p_cache++ = *p_Bqt_1++;
-                *p_cache++ = *p_Bqt_1++;
-                *p_cache++ = *p_Bqt_2++;
-                *p_cache++ = *p_Bqt_2++;
-                *p_cache++ = *p_Bqt_3++;
-                *p_cache++ = *p_Bqt_3++;
-            }
-
             for (int mi = 0; mi < M; mi++) {
 
-                const float _As = p_As[mi * Ks + ki / kc];
-
                 const int8_t* p_Aq = (const int8_t*)Aq + mi * K + ki;
-
-                p_cache = (int32_t*)cache;
+                const int32_t* p_Bqt_0 = (const int32_t*)Bqt + (ni + 0) * (K / 8) + (ki / 8);
+                const int32_t* p_Bqt_1 = (const int32_t*)Bqt + (ni + 1) * (K / 8) + (ki / 8);
+                const int32_t* p_Bqt_2 = (const int32_t*)Bqt + (ni + 2) * (K / 8) + (ki / 8);
+                const int32_t* p_Bqt_3 = (const int32_t*)Bqt + (ni + 3) * (K / 8) + (ki / 8);
 
                 int32x4_t _sum_0 = vdupq_n_s32(0);
                 int32x4_t _sum_1 = vdupq_n_s32(0);
@@ -129,16 +110,17 @@ inline void gemm_s4_group(const int M, const int N, const int K, const int8x16_t
                 #pragma unroll
                 for (int kki = 0; kki < kc; kki += 16) {
                     int8x16_t _d = vld1q_s8(p_Aq); p_Aq += 16;
-                    _sum_0 = vdotq_s32(_sum_0, get_int4x16_weight(p_cache, _mask, _zeros), _d); p_cache += 2;
-                    _sum_1 = vdotq_s32(_sum_1, get_int4x16_weight(p_cache, _mask, _zeros), _d); p_cache += 2;
-                    _sum_2 = vdotq_s32(_sum_2, get_int4x16_weight(p_cache, _mask, _zeros), _d); p_cache += 2;
-                    _sum_3 = vdotq_s32(_sum_3, get_int4x16_weight(p_cache, _mask, _zeros), _d); p_cache += 2;
+                    _sum_0 = vdotq_s32(_sum_0, get_int4x16_weight(p_Bqt_0, _mask, _zeros), _d); p_Bqt_0 += 2;
+                    _sum_1 = vdotq_s32(_sum_1, get_int4x16_weight(p_Bqt_1, _mask, _zeros), _d); p_Bqt_1 += 2;
+                    _sum_2 = vdotq_s32(_sum_2, get_int4x16_weight(p_Bqt_2, _mask, _zeros), _d); p_Bqt_2 += 2;
+                    _sum_3 = vdotq_s32(_sum_3, get_int4x16_weight(p_Bqt_3, _mask, _zeros), _d); p_Bqt_3 += 2;
                 }
 
-                float _Bs_0 = float(((const __fp16*)Bst)[(ni + 0) * Ks + ki / kc]);
-                float _Bs_1 = float(((const __fp16*)Bst)[(ni + 1) * Ks + ki / kc]);
-                float _Bs_2 = float(((const __fp16*)Bst)[(ni + 2) * Ks + ki / kc]);
-                float _Bs_3 = float(((const __fp16*)Bst)[(ni + 3) * Ks + ki / kc]);
+                const float _As = p_As[mi * Ks + ki / kc];
+                const float _Bs_0 = float(p_Bst[(ni + 0) * Ks + ki / kc]);
+                const float _Bs_1 = float(p_Bst[(ni + 1) * Ks + ki / kc]);
+                const float _Bs_2 = float(p_Bst[(ni + 2) * Ks + ki / kc]);
+                const float _Bs_3 = float(p_Bst[(ni + 3) * Ks + ki / kc]);
 
                 p_C[mi * N + (ni + 0)] += __fp16(vaddvq_s32(_sum_0) * _As * _Bs_0);
                 p_C[mi * N + (ni + 1)] += __fp16(vaddvq_s32(_sum_1) * _As * _Bs_1);
@@ -231,6 +213,7 @@ inline void gemv_s4_group(const int N, const int K, const int8x16_t _mask, const
     }
 
     const float* p_As = (const float*)As;
+    const __fp16* p_Bst = (const __fp16*)Bst;
     __fp16* p_C = (__fp16*)C;
 
     #pragma omp parallel for num_threads(opt.num_threads)
@@ -245,14 +228,12 @@ inline void gemv_s4_group(const int N, const int K, const int8x16_t _mask, const
             int32x4_t _sum = vdupq_n_s32(0);
             #pragma unroll
             for (int kki = 0; kki < kc; kki += 16) {
-                int8x16_t _d = vld1q_s8(p_Aq);
-                _sum = vdotq_s32(_sum, get_int4x16_weight(p_Bqt, _mask, _zeros), _d);
-                p_Aq += 16;
-                p_Bqt += 2;
+                int8x16_t _d = vld1q_s8(p_Aq); p_Aq += 16;
+                _sum = vdotq_s32(_sum, get_int4x16_weight(p_Bqt, _mask, _zeros), _d); p_Bqt += 2;
             }
 
-            const float _Bs = float(((const __fp16*)Bst)[ni * Ks + ki / kc]);
             const float _As = p_As[ki / kc];
+            const float _Bs = float(p_Bst[ni * Ks + ki / kc]);
 
             p_C[ni] += __fp16(vaddvq_s32(_sum) * _As * _Bs);
         }
