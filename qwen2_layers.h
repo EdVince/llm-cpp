@@ -82,6 +82,7 @@ public:
         if (top_blob.empty())
             return -100;
 
+        const int half_head_dim = head_dim / 2;
         const int group = hidden_size/group_size;
         const int part_size = hidden_size/part;
         const float scale_factor = 1.f / sqrt(head_dim);
@@ -130,21 +131,19 @@ public:
             int rotary_emb_position_offset = past_len * head_dim;
             #pragma omp parallel for num_threads(opt.num_threads)
             for (int i = 0; i < num_heads; i++) {
-                for (int k = 0; k < head_dim/2; k++) {
+                for (int k = 0; k < half_head_dim; k++) {
                     p_new_query_states[i*head_dim + k] = __fp16(
                                     p_cos[rotary_emb_position_offset + k] * float(p_query_states[i*head_dim + k]) - 
-                                    p_sin[rotary_emb_position_offset + k] * float(p_query_states[i*head_dim + k+head_dim/2]));
+                                    p_sin[rotary_emb_position_offset + k] * float(p_query_states[i*head_dim + k + half_head_dim]));
                     p_new_key_states[i*head_dim + k] = __fp16(
                                     p_cos[rotary_emb_position_offset + k] * float(p_key_states[i*head_dim + k]) -
-                                    p_sin[rotary_emb_position_offset + k] * float(p_key_states[i*head_dim + k+head_dim/2]));
-                }
-                for (int k = 0; k < head_dim/2; k++) {
-                    p_new_query_states[i*head_dim + k+head_dim/2] = __fp16(
-                                    p_cos[rotary_emb_position_offset + k+head_dim/2] * float(p_query_states[i*head_dim + k+head_dim/2]) + 
-                                    p_sin[rotary_emb_position_offset + k+head_dim/2] * float(p_query_states[i*head_dim + k]));
-                    p_new_key_states[i*head_dim + k+head_dim/2] = __fp16(
-                                    p_cos[rotary_emb_position_offset + k+head_dim/2] * float(p_key_states[i*head_dim + k+head_dim/2]) + 
-                                    p_sin[rotary_emb_position_offset + k+head_dim/2] * float(p_key_states[i*head_dim + k]));
+                                    p_sin[rotary_emb_position_offset + k] * float(p_key_states[i*head_dim + k + half_head_dim]));
+                    p_new_query_states[i*head_dim + k + half_head_dim] = __fp16(
+                                    p_cos[rotary_emb_position_offset + k + half_head_dim] * float(p_query_states[i*head_dim + k + half_head_dim]) + 
+                                    p_sin[rotary_emb_position_offset + k + half_head_dim] * float(p_query_states[i*head_dim + k]));
+                    p_new_key_states[i*head_dim + k + half_head_dim] = __fp16(
+                                    p_cos[rotary_emb_position_offset + k + half_head_dim] * float(p_key_states[i*head_dim + k + half_head_dim]) + 
+                                    p_sin[rotary_emb_position_offset + k + half_head_dim] * float(p_key_states[i*head_dim + k]));
                 }
             }
 
@@ -197,8 +196,9 @@ public:
                     p_qk[q*S + s] = expf(p_qk[q*S + s] - max);
                     sum += p_qk[q*S + s];
                 }
+                sum = 1.f / sum;
                 for (int s = 0; s < S; s++) {
-                    p_qk[q*S + s] /= sum;
+                    p_qk[q*S + s] *= sum;
                 }
             }
             Q = num_heads;
@@ -227,7 +227,6 @@ public:
 
         if (seq_len > 1) {
             const int offset0 = seq_len * head_dim, offset1 = hidden_size;
-            const int half_head_dim = head_dim / 2;
             const int len = seq_len * head_dim;
 
             Mat quant_hidden_states(hidden_size * seq_len,1u,1,opt.workspace_allocator);
@@ -285,48 +284,25 @@ public:
                 const __fp16* p_new_key_states = (const __fp16*)new_key_states; // 输入
                 __fp16* p_query_states = (__fp16*)query_states; // 输出
                 __fp16* p_key_states = (__fp16*)key_states; // 输出
+                const float* p_cos = (const float*)rotary_emb_cos_cached; // cos
+                const float* p_sin = (const float*)rotary_emb_sin_cached; // sin
                 #pragma omp parallel for num_threads(opt.num_threads)
                 for (int i = 0; i < num_heads; i++) {
-                    const __fp16* p_q_in = (const __fp16*)p_new_query_states + i * len;
-                    const __fp16* p_k_in = (const __fp16*)p_new_key_states + i * len;
-                    __fp16* p_q_out = (__fp16*)p_query_states + i * len;
-                    __fp16* p_k_out = (__fp16*)p_key_states + i * len;
                     for (int j = 0; j < seq_len; j++) {
-                        const float* p_cos = (const float*)rotary_emb_cos_cached + j * head_dim; // cos
-                        const float* p_sin = (const float*)rotary_emb_sin_cached + j * head_dim; // sin
-                        for (int k = 0; k+3 < half_head_dim; k+=4) {
-                            float32x4_t _q0 = vcvt_f32_f16(vld1_f16(p_q_in));
-                            float32x4_t _q1 = vcvt_f32_f16(vld1_f16(p_q_in + half_head_dim));
-                            float32x4_t _k0 = vcvt_f32_f16(vld1_f16(p_k_in));
-                            float32x4_t _k1 = vcvt_f32_f16(vld1_f16(p_k_in + half_head_dim));
-
-                            float32x4_t _cos0 = vld1q_f32(p_cos);
-                            float32x4_t _sin0 = vld1q_f32(p_sin);
-
-                            float16x4_t _r0q = vcvt_f16_f32(vsubq_f32(vmulq_f32(_cos0,_q0),vmulq_f32(_sin0,_q1)));
-                            vst1_f16(p_q_out, _r0q);
-                            float16x4_t _r0k = vcvt_f16_f32(vsubq_f32(vmulq_f32(_cos0,_k0),vmulq_f32(_sin0,_k1)));
-                            vst1_f16(p_k_out, _r0k);
-
-                            float32x4_t _cos1 = vld1q_f32(p_cos + half_head_dim);
-                            float32x4_t _sin1 = vld1q_f32(p_sin + half_head_dim);
-
-                            float16x4_t _r1q = vcvt_f16_f32(vaddq_f32(vmulq_f32(_cos1,_q1),vmulq_f32(_sin1,_q0)));
-                            vst1_f16(p_q_out + half_head_dim, _r1q);
-                            float16x4_t _r1k = vcvt_f16_f32(vaddq_f32(vmulq_f32(_cos1,_k1),vmulq_f32(_sin1,_k0)));
-                            vst1_f16(p_k_out + half_head_dim, _r1k);
-
-                            p_cos+=4;
-                            p_sin+=4;
-                            p_q_in+=4;
-                            p_k_in+=4;
-                            p_q_out+=4;
-                            p_k_out+=4;
+                        for (int k = 0; k < half_head_dim; k++) {
+                            p_query_states[i*seq_len*head_dim + j*head_dim + k] = __fp16(
+                                            p_cos[j*head_dim + k] * float(p_new_query_states[i*seq_len*head_dim + j*head_dim + k]) - 
+                                            p_sin[j*head_dim + k] * float(p_new_query_states[i*seq_len*head_dim + j*head_dim + k + half_head_dim]));
+                            p_key_states[i*seq_len*head_dim + j*head_dim + k] = __fp16(
+                                            p_cos[j*head_dim + k] * float(p_new_key_states[i*seq_len*head_dim + j*head_dim + k]) -
+                                            p_sin[j*head_dim + k] * float(p_new_key_states[i*seq_len*head_dim + j*head_dim + k + half_head_dim]));
+                            p_query_states[i*seq_len*head_dim + j*head_dim + k + half_head_dim] = __fp16(
+                                            p_cos[j*head_dim + k + half_head_dim] * float(p_new_query_states[i*seq_len*head_dim + j*head_dim + k + half_head_dim]) + 
+                                            p_sin[j*head_dim + k + half_head_dim] * float(p_new_query_states[i*seq_len*head_dim + j*head_dim + k]));
+                            p_key_states[i*seq_len*head_dim + j*head_dim + k + half_head_dim] = __fp16(
+                                            p_cos[j*head_dim + k + half_head_dim] * float(p_new_key_states[i*seq_len*head_dim + j*head_dim + k + half_head_dim]) + 
+                                            p_sin[j*head_dim + k + half_head_dim] * float(p_new_key_states[i*seq_len*head_dim + j*head_dim + k]));
                         }
-                        p_q_in+=half_head_dim;
-                        p_k_in+=half_head_dim;
-                        p_q_out+=half_head_dim;
-                        p_k_out+=half_head_dim;
                     }
                 }
             }
@@ -351,17 +327,13 @@ public:
                                 *_p_qk = -FLOAT_INF;
                             }
                             else {
-                                float16x8_t _qk = vdupq_n_f16((__fp16)0.f);
+                                *_p_qk = 0.f;
                                 const __fp16* p_d = (const __fp16*)p_query_states + q*MK + m*K;
                                 const __fp16* p_w = (const __fp16*)p_key_states + q*NK + n*K;
-                                for (int k = 0; k+7 < K; k+=8) {
-                                    float16x8_t _d = vld1q_f16(p_d);
-                                    float16x8_t _w = vld1q_f16(p_w);
-                                    _qk = vfmaq_f16(_qk,_d,_w);
-                                    p_d+=8;
-                                    p_w+=8;
+                                for (int k = 0; k < K; k++) {
+                                    *_p_qk += float(*p_d++) * float(*p_w++);
                                 }
-                                *_p_qk = scale_factor * vaddvq_f32(vaddq_f32(vcvt_f32_f16(vget_low_f16(_qk)), vcvt_f32_f16(vget_high_f16(_qk))));
+                                *_p_qk *= scale_factor;
                             }
                             _p_qk++;
                         }
@@ -376,30 +348,16 @@ public:
                 for (int q = 0; q < Q; q++) {
                     for (int l = 0; l < L; l++) {
                         float max = -FLT_MAX;
-                        float32x4_t _max = vdupq_n_f32(-FLT_MAX);
-                        int s = 0;
-                        for (; s+3 < S; s+=4) {
-                            _max = vmaxq_f32(_max, vld1q_f32(p_qk + q*L*S + l*S + s));
-                        }
-                        for (; s < S; s++) {
+                        for (int s = 0; s < S; s++) {
                             max = std::max(max, p_qk[q*L*S + l*S + s]);
                         }
-                        max = std::max(max,vmaxvq_f32(_max));
                         float sum = 0.f;
-                        s = 0;
-                        for (; s < S; s++) {
+                        for (int s = 0; s < S; s++) {
                             p_qk[q*L*S + l*S + s] = expf(p_qk[q*L*S + l*S + s] - max);
                             sum += p_qk[q*L*S + l*S + s];
                         }
                         sum = 1.f / sum;
-                        float32x4_t _sum = vdupq_n_f32(sum);
-                        s = 0;
-                        for (; s+3 < S; s+=4) {
-                            float32x4_t _p = vld1q_f32(p_qk + q*L*S + l*S + s);
-                            _p = vmulq_f32(_p, _sum);
-                            vst1q_f32(p_qk + q*L*S + l*S + s, _p);
-                        }
-                        for (; s < S; s++) {
+                        for (int s = 0; s < S; s++) {
                             p_qk[q*L*S + l*S + s] *= sum;
                         }
                     }
@@ -517,6 +475,7 @@ public:
                 ncnn::Mat(), false, 
                 opt);
 
+            #pragma omp parallel for num_threads(opt.num_threads)
             for (int q = 0; q < seq_len; q++) {
                 const __fp16* p_gate = (const __fp16*)gate + q * intermediate_size;
                 const __fp16* p_up = (const __fp16*)up + q * intermediate_size;
