@@ -4,30 +4,8 @@
 #include <benchmark.h>
 
 inline int8x16_t get_int4x16_weight(const int32_t* p, const int8x16_t& _mask, const int8x16_t& _zeros) {
-    int32_t w0 = p[0];
-    int32_t w1 = p[1];
-
-    int8x16_t _w;
-
-    _w[ 0] = w0 >> 0;
-    _w[ 1] = w0 >> 4;
-    _w[ 2] = w0 >> 8;
-    _w[ 3] = w0 >> 12;
-    _w[ 4] = w0 >> 16;
-    _w[ 5] = w0 >> 20;
-    _w[ 6] = w0 >> 24;
-    _w[ 7] = w0 >> 28;
-
-    _w[ 8] = w1 >> 0;
-    _w[ 9] = w1 >> 4;
-    _w[10] = w1 >> 8;
-    _w[11] = w1 >> 12;
-    _w[12] = w1 >> 16;
-    _w[13] = w1 >> 20;
-    _w[14] = w1 >> 24;
-    _w[15] = w1 >> 28;
-
-    return vsubq_s8(vandq_s8(_w,_mask),_zeros);
+    int8x8_t vec = vld1_s8((int8_t*)p);
+    return vsubq_s8(vandq_s8(vcombine_s8(vec, vshr_n_s8(vec, 4)), _mask), _zeros);
 }
 
 inline void group_quant(const int group_size, const int M, const int K, 

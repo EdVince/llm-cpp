@@ -4,8 +4,8 @@
 In M1, prefill 128 token and decode 128 token:
 | model                       | prefill(token/s) | decode(token/s) | RAM   |
 | --------------------------- | ---------------- | --------------- | ----- |
-| Qwen1.5-0.5B-Chat-GPTQ-Int4 | 365              | 60              | 360M  |
-| Qwen1.5-1.8B-Chat-GPTQ-Int4 | 101              | 18              | 1100M |
+| Qwen1.5-0.5B-Chat-GPTQ-Int4 | 281              | 103             | 360M  |
+| Qwen1.5-1.8B-Chat-GPTQ-Int4 | 79               | 39              | 1100M |
 
 ### Implement & Feature detail
  - 支持直接加载huggingface格式的模型
